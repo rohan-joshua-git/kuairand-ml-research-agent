@@ -1,38 +1,47 @@
 # Autonomous ML Research Agent — configuration
 #
-# Values marked "PLACEHOLDER — pending Starter Kit" are unknown until the
-# organizers hand over the official baseline, eval script, candidate-set
-# definition, and convergence/budget rules. Everything that depends on them
-# is isolated here (or reads from here) so the rest of the codebase never
-# hardcodes an assumption.
+# The organizer Starter Kit (vendored, unmodified, at ./starter_kit/) has
+# now answered nearly everything that used to be a placeholder here: the
+# official baseline (FM), the eval script, the candidate-set definition,
+# and the convergence/budget rules. See starter_kit/README.md and
+# starter_kit/baseline_scores.json for the source of every value below.
 
 dataset:
   name: kuairand-pure
   raw_dir: "./data/raw"
   processed_dir: "./data/processed"
-  # Date-based split fixed by the challenge brief.
+  # Date-based split, exactly as fixed by starter_kit/data.py::SPLITS.
   train_range: ["2022-04-08", "2022-04-21"]
-  val_range:   ["2022-04-22", "2022-04-30"]   # first half of 4/22-5/08
-  test_range:  ["2022-05-01", "2022-05-08"]   # second half of 4/22-5/08 (HIDDEN — never touch during dev)
+  val_range:   ["2022-04-22", "2022-04-28"]
+  test_range:  ["2022-04-29", "2022-05-08"]   # HIDDEN — never touch during dev
   logs:
     standard_train: "log_standard_4_08_to_4_21_pure.csv"
     standard_evalset: "log_standard_4_22_to_5_08_pure.csv"
     random_unbiased: "log_random_4_22_to_5_08_pure.csv"   # Play 1 — see referee.py
+  user_features: "user_features_pure.csv"
+  video_features_basic: "video_features_basic_pure.csv"     # has author_id, used by the official FM baseline
+  video_features_statistic: "video_features_statistic_pure.csv"  # leaky — see leakage_guard.py, not used raw
   supplements:
-    captions: "kuairand_video_captions.csv"      # Zenodo supplement — gate on organizer confirmation
-    categories: "kuairand_video_categories.csv"  # Zenodo supplement — gate on organizer confirmation
+    captions: "kuairand_video_captions.csv"      # not referenced anywhere in the Starter Kit — treat as
+    categories: "kuairand_video_categories.csv"  # out of scope unless organizers explicitly say otherwise
 
-# PLACEHOLDER — pending Starter Kit answers. Do not trust these for a final
-# hidden-test submission until confirmed by organizers. See README "Open
-# Questions" section.
+# Confirmed by starter_kit/README.md + starter_kit/baseline_scores.json.
 starter_kit:
-  candidate_set: "unknown"       # "impressed_set" | "all_items" — changes GAUC/nDCG@5 semantics
-  epsilon: 0.002                 # convergence: min improvement to not count as "plateaued" (challenge brief)
-  patience_n: 3                  # convergence: iterations without improvement before stopping (challenge brief)
-  wall_clock_cap_hours: 6.0      # hard ceiling on agent run time (challenge brief)
-  compute_budget_gpu_hours: null # unknown — reference pipeline needs no GPU; wall-clock is what's scored
-  token_budget: null             # unknown
-  submission_schema_path: null   # unknown — pipeline/submit.py raises until this is set
+  candidate_set: "impressed_set"   # confirmed: "用户内排序" — within-user ranking over logged impressions only
+  epsilon: 0.002                   # convergence: min primary-metric improvement to not count as "plateaued"
+  patience_n: 3                    # convergence: iterations without improvement before stopping
+  wall_clock_cap_hours: 6.0        # hard ceiling on agent run time
+  compute_budget_gpu_hours: null   # reference pipeline needs no GPU (starter_kit FM: ~20s/seed, CPU); wall-clock is what's scored
+  token_budget: null               # not specified by the Starter Kit
+  submission_schema_path: "./starter_kit/submit.py"  # confirmed format: row_id,user_id,video_id,score — see pipeline/submit.py
+  # FM baseline scores (label=long_view, seed-averaged) — the reference this
+  # agent must reproduce, then beat. Full ladder + composition stats in
+  # starter_kit/baseline_scores.json.
+  official_baseline:
+    valid: {gauc: 0.6674, ndcg_at_5: 0.5357, primary: 0.6016}
+    test:  {gauc: 0.6610, ndcg_at_5: 0.5282, primary: 0.5946}  # hidden — for reference only, never evaluate against this during dev
+  oracle_ceiling:
+    test:  {gauc: 1.0000, ndcg_at_5: 0.7289, primary: 0.8645}  # perfect ranking using true labels as scores — judge progress against this, not 1.0
 
 # Play 1 (Unbiased Referee) — Tier A/B toggle depends on organizer answer to
 # "is log_random permitted for training, propensity-only, or not at all?"

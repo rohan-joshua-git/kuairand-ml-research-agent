@@ -6,46 +6,75 @@ double the token cost — only tiered, targeted loading beats cold-start.
 Tier 1 stays under ~1 page; deeper material lives in Tier 2/3 and is loaded
 by `retriever.py` only when the current ablation target calls for it.
 
-## Task framing
+## Task framing (confirmed by the official Starter Kit — `starter_kit/`)
 
-- Dataset: KuaiRand-Pure. Positive label: `is_click`. Metrics: GAUC,
-  nDCG@5. Scored as `mean(GAUC_delta, nDCG@5_delta)` vs. the organizer
-  baseline — **absolute** delta, not relative, on the hidden test set.
-  Both metrics sit in a comparable range (perfect ranking: GAUC 1.0000,
-  nDCG@5 0.7289; random: ~0.4753 combined) so neither dominates the mean —
-  treat ranking quality (GAUC: does the model separate a user's clicked
-  items from their non-clicked ones) and top-of-list precision (nDCG@5)
-  as equally worth optimizing.
-- Split is date-pinned: train = 4/08-4/21, val = first half of 4/22-5/08,
-  test = second half (hidden — never load it, see `pipeline/data/loader.py`
-  `allow_test` guard).
+- Dataset: KuaiRand-Pure. **Positive label: `long_view`** (native 0/1
+  column, no resolution needed — see `pipeline/data/label.py`). `is_click`
+  is a *different*, unscored signal — useful only as a candidate auxiliary
+  task, never as the training target.
+- Task: **within-user ranking over logged impressions** — each user's
+  candidates are only the videos they were actually shown in the eval
+  window, not the full ~7,583-item catalog. No retrieval/candidate-
+  generation step needed.
+- Metrics: GAUC, nDCG@5. Scored as `primary = mean(GAUC, nDCG@5)` vs. the
+  official baseline — **absolute** delta, not relative, on the hidden test
+  set. Zero-positive users count as nDCG=0 in the mean; GAUC only counts
+  users with `0 < positives < impressions`, weighted by positive count.
+- Split: train `2022-04-08..04-21` / valid `2022-04-22..04-28` / test
+  `2022-04-29..05-08` (hidden — never load it, see
+  `pipeline/data/loader.py`'s `allow_test` guard).
+- **Official FM baseline (the target): valid primary 0.6016, test primary
+  0.5946.** Full ladder in `starter_kit/baseline_scores.json`: random
+  0.4753, item-popularity 0.5715, FM 0.5946, oracle ceiling 0.8645 (test).
+  nDCG@5's ceiling is 0.7289, not 1.0 — 27.1% of test users are all-negative
+  (nDCG stuck at 0 regardless of model) and 9.2% all-positive. **Judge
+  progress against 0.8645, not 1.0** — the FM baseline has already claimed
+  ~31% of the attainable headroom.
+- Convergence: ε=0.002, N=3 (FM's seed-to-seed std is 0.0008, so this is
+  ≈2.5σ — a real plateau, not noise).
 - You are scored once, on the validation-best checkpoint at convergence.
   A checkpoint that scores well on validation but doesn't generalize is
   worse than useless — see `agent/compression_gate.py` and use it before
   designating anything final.
 
-## Dataset-specific traps (verified against the KuaiRand-Pure field spec)
+## What NOT to waste iterations on (organizer-tested, see `starter_kit/README.md`)
 
-1. **`is_click` is two different constructs.** In the two-column UI it's a
-   genuine tap. In the single-column UI it's actually `valid_play`:
-   `play_time_ms >= duration_ms` (videos under 7000ms) or
-   `play_time_ms > 7000ms` (longer videos). See `pipeline/data/label.py`.
-   Don't assume a uniform semantic — profile it first (`profile_label`).
-2. **`video_features_statistic` columns leak.** They're running averages
-   computed over the full month, which spans train/val/test. Don't use them
-   raw — `pipeline/data/leakage_guard.py` drops them by default. If you
-   reconstruct a point-in-time version, log that decision explicitly.
-3. **KuaiRand-Pure is the debiasing/multi-task variant**, not the
-   sequential-modeling variant (that's 27K/1K). Heavy sequential
-   architectures (long user-history transformers) are likely to
-   underperform here relative to debiasing and multi-task approaches.
-   Don't burn iterations on sequence models as a first move.
-4. **There's a fourth log file** (`log_random_...`) outside the prescribed
-   split — uniformly-random exposure, ~1.19M interactions. It's in-dataset,
-   not external data, but its use is gated by
-   `config.referee.mode` pending organizer confirmation. See
-   `agent/referee.py` and README "Open Questions" before relying on it for
-   anything beyond diagnostics.
+1. **More static features.** Adding CWM's full 13 feature domains
+   (music_id, video_type, upload_type + 6 user-side coarse buckets) moved
+   test primary from 0.5950 to 0.5940 — noise, if anything slightly worse.
+2. **More model capacity.** FM embedding dim k=8/16/32 gave 0.5895/0.5902/
+   0.5887 — barely moves. 1.14M training rows can't support much more
+   capacity, and `user_id × video_id` crosses already capture most of the
+   learnable signal.
+3. **Pure user-side features, full stop.** Ranking is *within* a user, so
+   any feature that's constant across a user's own candidates contributes
+   exactly zero to their ranking (verified empirically: `item_pop × user
+   bias` scores bit-identical to plain `item_pop`). User-side signal only
+   matters through a **cross term with an item-side feature**.
+
+## Where the organizers believe headroom actually is (priority order, untested by them)
+
+1. **Loss/objective mismatch** — training is pointwise logloss but the
+   metrics are ranking metrics (GAUC, nDCG). Pairwise (BPR) or listwise
+   (per-user softmax over that user's impressions) loss aligns the
+   objective with what's scored. **This is what they'd try first.**
+2. **User history sequence** — current features use zero behavioral
+   sequence, despite each user having hundreds-to-thousands of train
+   interactions. DIN/SIM-style interest modeling is untouched territory.
+3. **Multi-task** — `is_click`, `is_like`, `is_follow`, `is_comment`,
+   `is_forward`, `play_time_ms` are all in the logs but unused; auxiliary
+   heads on top of `long_view` (see Tier 2/3) are a natural next step.
+4. **Watch-time modeling** — CWM's contribution: treat watch time as
+   right-censored (a video that plays to completion has an unknown true
+   "would-have-watched" time) and use a one-sided/censored loss rather than
+   squared error. Research-depth, higher effort.
+5. **Model swap** (DeepFM/DCN/xDeepFM) — deprioritized versus 1-4 since
+   capacity is confirmed not to be the bottleneck.
+6. **Time features / distribution drift** — `hourmin`, `date`, and drift
+   between train and test.
+7. **Unbiased validation (advanced)** — `log_random_4_22_to_5_08_pure.csv`
+   (1.19M rows, uniform exposure) as an overfitting check. See
+   `agent/referee.py` and Tier 3 `autodebias.md`.
 
 ## Where to look next
 

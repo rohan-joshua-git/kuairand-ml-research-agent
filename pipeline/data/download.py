@@ -31,8 +31,14 @@ def load_config() -> dict:
 
 
 def required_files(cfg: dict) -> list[str]:
-    logs = cfg["dataset"]["logs"]
-    return [logs["standard_train"], logs["standard_evalset"], logs["random_unbiased"]]
+    ds = cfg["dataset"]
+    logs = ds["logs"]
+    return [
+        logs["standard_train"],
+        logs["standard_evalset"],
+        logs["random_unbiased"],
+        ds["video_features_basic"],  # author_id — used by starter_kit/baseline.py's FM fields
+    ]
 
 
 def check(cfg: dict) -> bool:

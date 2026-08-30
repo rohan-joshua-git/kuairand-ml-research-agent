@@ -1,20 +1,27 @@
 """
-Play 3 (Label Archaeology): `is_click` is not one signal.
+Primary label + Play 3 (Label Archaeology).
 
-Per the KuaiRand field spec, `is_click` means different things depending on
-which UI the interaction happened in (the `tab` field, range 0-14):
+The official Starter Kit (`starter_kit/data.py` / `evaluate.py`) fixes the
+SCORED label as `long_view` — a clean, native 0/1 column that needs no
+resolution. `resolve_primary_label` below is what training and evaluation
+must use.
+
+`is_click` is a *different*, separate signal, not the scored label — but
+it's still a genuinely useful one, and per the KuaiRand field spec it means
+different things depending on which UI the interaction happened in (the
+`tab` field, range 0-14):
 
   - Two-column UI: is_click is a genuine tap/click.
   - Single-column UI (main feed): is_click is actually `valid_play` —
     1 when play_time_ms >= duration_ms for videos under 7000ms, or when
     play_time_ms > 7000ms for longer videos.
 
-The challenge brief fixes "click" as the positive label without mentioning
-this split. Silently training on the raw column conflates two different
-user-behavior constructs. This module makes the distinction explicit,
-resolves a clean label, and *reports* the finding (this is meant to show up
-in the agent's run log as a discovered insight, not just get quietly
-patched).
+Conflating those two constructs would corrupt `is_click` if it's ever used
+as an auxiliary multi-task signal (see `starter_kit/README.md`'s headroom
+item #3 and `pipeline/data/features.py::AUXILIARY_LABEL_COLUMNS`). The rest
+of this module makes that distinction explicit and *reports* the finding
+(meant to show up in the agent's run log as a discovered insight, not just
+get quietly patched).
 """
 from __future__ import annotations
 
@@ -22,7 +29,14 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+PRIMARY_LABEL_COLUMN = "long_view"
 DURATION_THRESHOLD_MS = 7000
+
+
+def resolve_primary_label(df: pd.DataFrame) -> pd.Series:
+    """The official scored label. Already clean (0/1) per the Starter Kit —
+    no resolution needed, unlike `is_click` below."""
+    return (df[PRIMARY_LABEL_COLUMN] != 0).astype(int)
 
 
 @dataclass

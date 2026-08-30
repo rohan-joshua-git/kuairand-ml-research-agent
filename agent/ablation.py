@@ -46,11 +46,20 @@ def default_block_variants() -> list[BlockVariant]:
     expected to grow/replace this list over iterations as it introduces new
     blocks (e.g. once a debiasing block or multitask head exists, add
     variants that toggle them) — this function is a seed, not a fixed set.
+
+    No variant currently routes `orchestrator.py`'s editable-target picker
+    (`"label" in target.block_name`) to `pipeline/data/label.py` — the
+    former `label_resolution` variant tested `is_click` UI-mode conflation,
+    which stopped being meaningful once `long_view` (already a clean 0/1
+    column, per the Starter Kit) became the primary label instead of
+    `is_click`. That routing gap closes naturally once a real label-side
+    lever exists again (e.g. an `is_click` auxiliary-loss toggle once
+    multitask heads land — see `starter_kit/README.md` headroom item #3).
     """
     return [
-        BlockVariant("label_resolution", "raw vs click_only label mode", {"label_mode": "click_only"}),
         BlockVariant("training_schedule", "more epochs", {"epochs": 6}),
         BlockVariant("learning_rate", "lower learning rate", {"lr": 3e-4}),
+        BlockVariant("pos_class_weight", "upweight long_view positives via BCE pos_weight", {"pos_weight": 2.0}),
     ]
 
 

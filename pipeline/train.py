@@ -4,8 +4,9 @@ each iteration (Figure 1 "train + tune" stage) — loss function, optimizer,
 hyperparameters, and (via pipeline/model/architectures/) the model class
 itself are all fair game for the agent to change.
 
-Running this file directly trains the placeholder baseline end-to-end on
-whatever's in `config.dataset.raw_dir` and reports val metrics. The
+Running this file directly trains this pipeline's own starting model
+end-to-end on whatever's in `config.dataset.raw_dir` and reports val
+metrics — not the scored baseline, see `pipeline/model/baseline.py`. The
 orchestrator calls into `run_training` programmatically rather than
 shelling out, so it can capture metrics/losses per epoch for the run log.
 """
@@ -20,7 +21,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
 from pipeline.data.features import NUMERIC_SIGNAL_COLUMNS, build_features
-from pipeline.data.label import resolve_label
+from pipeline.data.label import resolve_primary_label
 from pipeline.data.loader import KuaiRandSplit, load_config, load_split
 from pipeline.evaluate import RankingMetrics, compute_ranking_metrics
 from pipeline.model.baseline import BaselineCTRModel
@@ -63,27 +64,26 @@ def _build_id_maps(train_df: pd.DataFrame) -> dict:
 
 def run_training(
     split: KuaiRandSplit | None = None,
-    label_mode: str = "raw",
-    two_column_tabs: set[int] | None = None,
     epochs: int = 3,
     batch_size: int = 2048,
     lr: float = 1e-3,
+    pos_weight: float | None = None,
     device: str = "cpu",
 ) -> TrainResult:
     cfg = load_config()
     split = split or load_split(cfg)
-    two_column_tabs = two_column_tabs or set()
 
     train_feat = build_features(split.train)
     val_feat = build_features(split.val)
 
     id_maps = _build_id_maps(train_feat)
 
-    train_label = resolve_label(train_feat, two_column_tabs, mode=label_mode)
-    val_label = resolve_label(val_feat, two_column_tabs, mode=label_mode)
+    train_label = resolve_primary_label(train_feat)
+    val_label = resolve_primary_label(val_feat)
 
-    # unseen ids in val fall back to index 0 rather than crashing —
-    # acceptable for a placeholder baseline, worth revisiting for a real run
+    # unseen ids in val fall back to index 0 rather than crashing — a
+    # simplification worth revisiting (e.g. a dedicated UNK embedding slot)
+    # once this stops being the pipeline's iteration-0 starting model
     train_feat = train_feat[train_feat["user_id"].isin(id_maps["user"]) & train_feat["video_id"].isin(id_maps["video"])]
     val_feat = val_feat.copy()
     val_feat["user_id"] = val_feat["user_id"].where(val_feat["user_id"].isin(id_maps["user"]), next(iter(id_maps["user"])))
@@ -100,7 +100,8 @@ def run_training(
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = nn.BCEWithLogitsLoss()
+    pos_weight_t = torch.tensor(pos_weight, dtype=torch.float32) if pos_weight else None
+    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight_t)
 
     epoch_losses = []
     model.train()

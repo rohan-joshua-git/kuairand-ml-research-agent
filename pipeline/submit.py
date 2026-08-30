@@ -1,42 +1,49 @@
 """
 Generates the final submission artifact.
 
-The organizer-defined submission schema is a Day-1 blocker (see README /
-config.starter_kit.submission_schema_path) — this module raises loudly
-rather than guessing a schema and silently producing something that won't
-parse on the organizer's side. Wire the real writer in once the Starter
-Kit schema is confirmed; the TODO marks exactly where.
+Schema is confirmed by the Starter Kit (`starter_kit/submit.py` /
+`starter_kit/README.md`) — CSV with header `row_id,user_id,video_id,score`:
+
+    row_id    0-indexed, strictly sequential, matching the row order of
+              `pipeline.data.loader.load_split(cfg, allow_test=True).test`
+              (which itself preserves the source CSV's row order, filtered
+              by date — the same determinism the organizer's `data.load()`
+              produces).
+    user_id / video_id   redundant, used only by the organizer's checker to
+              confirm alignment with their own eval-set row order.
+    score     any real number; only relative order within a user matters.
+              NaN/Inf are rejected by the organizer's checker.
+
+Why row_id and not (user_id, video_id) as the key: those pairs are NOT
+unique in the eval set (per the Starter Kit, ~3% of test rows are
+duplicate (user_id, video_id) pairs, up to 12x) — row position is the only
+valid key.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-import torch
-
-from pipeline.data.loader import load_config
-
-
-class SubmissionSchemaUnknown(RuntimeError):
-    pass
+import numpy as np
+import pandas as pd
 
 
-def write_submission(model: torch.nn.Module, id_maps: dict, out_path: str | Path) -> None:
-    cfg = load_config()
-    schema_path = cfg["starter_kit"].get("submission_schema_path")
+def write_submission(scores: np.ndarray, split_df: pd.DataFrame, out_path: str | Path) -> None:
+    """`scores` must be aligned 1:1 with `split_df`'s row order (e.g. the
+    `test` or `val` DataFrame from `pipeline.data.loader.load_split`)."""
+    scores = np.asarray(scores, dtype=np.float64)
+    if len(scores) != len(split_df):
+        raise ValueError(f"scores has {len(scores)} rows but split_df has {len(split_df)}")
+    if not np.isfinite(scores).all():
+        raise ValueError("scores contains NaN/Inf — the organizer's checker rejects these")
 
-    if not schema_path:
-        raise SubmissionSchemaUnknown(
-            "config.starter_kit.submission_schema_path is not set. Obtain the "
-            "official submission schema from the organizer Starter Kit before "
-            "generating a real submission — see README 'Open Questions'. "
-            "(TODO: once the schema is known, replace this function body with "
-            "the actual writer — e.g. per-user top-K ranked candidate lists in "
-            "the organizer's specified format.)"
-        )
-
-    # Placeholder shape once a schema exists: swap this block for the real writer.
+    out = pd.DataFrame(
+        {
+            "row_id": np.arange(len(split_df)),
+            "user_id": split_df["user_id"].to_numpy(),
+            "video_id": split_df["video_id"].to_numpy(),
+            "score": scores,
+        }
+    )
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump({"note": "placeholder — schema not yet wired"}, f)
+    out.to_csv(out_path, index=False)

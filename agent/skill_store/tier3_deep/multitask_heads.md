@@ -1,33 +1,32 @@
-# Tier 3 deep dive — multi-task / scenario-conditioned heads
+# Tier 3 deep dive — multi-task heads
 
 Loaded when the ablation target is the model architecture block and the
-current bottleneck looks like label sparsity or label-semantics conflation
-(see Tier 1, trap #1: `is_click` means two different things depending on
-`tab`).
+current bottleneck looks like label sparsity (organizer headroom item #3 —
+see Tier 1). The scored label is `long_view`; every other feedback signal
+in the log (`is_click`, `is_like`, `is_follow`, `is_comment`, `is_forward`,
+`is_hate`) is fair game as an auxiliary task, none of it is pre-resolved
+for you the way `long_view` is.
 
-## Scenario-conditioned heads (Play 3)
+## `is_click`'s own quirk (still real, just no longer the scored label)
 
-Rather than a single shared output head predicting one `is_click`, condition
-the final layer(s) on `tab` (or on the coarser two-column/single-column
-split derived from it):
-
-- Shared bottom: embeddings + cross layers, as in the baseline.
-- Per-scenario head: either (a) a small `tab`-indexed set of final linear
-  layers, or (b) a single head with `tab` embedding concatenated in late
-  (cheaper, less capacity for scenario-specific patterns).
-- Rationale: a genuine "click" in the two-column UI and a duration-derived
-  "valid_play" in the single-column UI are different behavioral signals
-  with different base rates (verify with
-  `pipeline/data/label.py::profile_label` before assuming this helps —
-  it's a hypothesis to test, not a guaranteed win).
+Per the KuaiRand field spec, `is_click` means different things depending on
+`tab` (two-column UI: a genuine tap; single-column UI: actually
+`valid_play`, a duration-derived proxy — see
+`pipeline/data/label.py::profile_label` / `resolve_label`). If `is_click`
+is used as an auxiliary task, feeding the raw conflated column in is still
+a mistake — use `resolve_label(df, two_column_tabs, mode="click_only")` (or
+a scenario-conditioned head keyed on `tab`) rather than the raw column, so
+the auxiliary signal isn't itself noisy.
 
 ## Auxiliary-task transfer (ESMM/PLE, see Tier 2)
 
 Concretely, for KuaiRand:
-- Primary task: `is_click` (the scored label).
-- Candidate auxiliary tasks: `long_view` (strong engagement signal, likely
-  positively correlated with click but less sparse), `is_like` /
-  `is_follow` (sparser but higher-precision positive signal).
+- Primary task: `long_view` (the scored label, resolved via
+  `pipeline/data/label.py::resolve_primary_label`).
+- Candidate auxiliary tasks: `is_click` (see quirk above — resolve it
+  first), `is_like` / `is_follow` (sparser but higher-precision positive
+  signal), `play_time_ms` (continuous, could support the watch-time/CWM
+  direction in Tier 1 headroom item #4 instead of a binary auxiliary head).
 - Start with the simplest viable setup: shared bottom + task-specific
   towers, weighted sum of losses (primary task weighted highest). Only move
   to PLE's explicit shared/specific expert split if the simple version

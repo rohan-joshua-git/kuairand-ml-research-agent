@@ -1,15 +1,16 @@
 """
-PLACEHOLDER baseline — pending the organizer's official Starter Kit.
+This pipeline's own starting model — NOT the scored baseline.
 
 The challenge rules are explicit: the agent is scored against the
-organizer-provided reference baseline, NOT a baseline it (or we) wrote
-ourselves. This module is a stand-in so the rest of the pipeline
-(train/evaluate/submit) has something real to run against during
-development. It must be swapped for the actual organizer baseline before
-any hidden-test submission is meaningful — see README "Open Questions".
+organizer-provided reference baseline, not one it (or we) wrote ourselves.
+That reference is the vendored `starter_kit/baseline.py` (FM) and its
+numbers in `config.starter_kit.official_baseline` — see README "Confirmed
+by the Starter Kit". This module is what the agent's own pipeline starts
+from and iterates on; it needs to reach and then beat the FM numbers, not
+replace them.
 
 Architecture: a small embedding + MLP CTR model (user_id, video_id, tab,
-numeric signals -> click probability). This is a standard, unglamorous
+numeric signals -> long_view probability). This is a standard, unglamorous
 DeepFM-lite reference point, chosen because it's cheap to train and gives
 the agent's ablation loop (agent/ablation.py) an obvious set of blocks to
 improve on: embeddings, feature crosses, the MLP tower, the loss.

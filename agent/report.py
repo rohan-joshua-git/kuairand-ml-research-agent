@@ -39,19 +39,22 @@ def generate_results_table(cfg: dict | None = None) -> str:
 
     lines = ["# Results\n"]
     lines.append(
-        "**Note:** metrics below are against the placeholder baseline "
-        "(`pipeline/model/baseline.py`) until the organizer's official "
-        "Starter Kit baseline is wired in — see README 'Open Questions'.\n"
+        "**Note:** \"Delta vs official baseline\" is against the FM baseline's "
+        "official validation score (`starter_kit/baseline_scores.json`, "
+        "primary=0.6016) — the target Task Requirement #1 asks the agent to "
+        "reproduce and then beat. \"Delta vs prev best\" is the self-referential "
+        "improvement that drives the convergence rule.\n"
     )
-    lines.append("| Iteration | Hypothesis | GAUC | nDCG@5 | Delta vs prev best | Accepted | Errors |")
-    lines.append("|---|---|---|---|---|---|---|")
+    lines.append("| Iteration | Hypothesis | GAUC | nDCG@5 | Delta vs prev best | Delta vs official baseline | Accepted | Errors |")
+    lines.append("|---|---|---|---|---|---|---|---|")
     for it in iterations:
         m = it.get("metrics", {})
         errors = "; ".join(it.get("errors", [])) or "-"
         lines.append(
             f"| {it['iteration']} | {it['hypothesis'][:80]} | "
             f"{m.get('gauc', float('nan')):.4f} | {m.get('ndcg_at_5', float('nan')):.4f} | "
-            f"{m.get('delta_vs_prev_best', float('nan')):+.4f} | {m.get('accepted_as_new_best', False)} | {errors} |"
+            f"{m.get('delta_vs_prev_best', float('nan')):+.4f} | {m.get('delta_vs_official_baseline', float('nan')):+.4f} | "
+            f"{m.get('accepted_as_new_best', False)} | {errors} |"
         )
 
     lines.append("\n## Resource usage\n")

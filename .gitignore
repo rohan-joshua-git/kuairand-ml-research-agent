@@ -16,7 +16,10 @@ env/
 logs/*
 !logs/.gitkeep
 
-# Processed data
+# Real KuaiRand-Pure data — ~200MB, CC-BY-SA from Kuaishou, not ours to
+# redistribute via this repo. Get it per pipeline/data/download.py (or
+# README Setup) and place it here locally; every teammate does this once.
+data/raw/*.csv
 data/processed/
 
 # OS / editor

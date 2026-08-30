@@ -10,22 +10,23 @@ wholesale every iteration.
   high-order interactions, sharing the embedding layer. Good default for
   sparse categorical CTR features (user_id, video_id, tab).
 - **DIN (Deep Interest Network)**: attention over a user's historical
-  interactions weighted by relevance to the candidate item. Relevant if
-  building any sequence-of-recent-interactions feature, but remember Tier
-  1's warning: KuaiRand-Pure's sequential logs are incomplete (only the
-  ~7,583 candidate-pool videos are logged), so a full DIN-style attention
-  stack may be more complexity than the data supports.
+  interactions weighted by relevance to the candidate item. Per Tier 1, the
+  organizers rank user-history sequence modeling as headroom item #2 —
+  each user has hundreds-to-thousands of train interactions, and no
+  sequential feature exists yet. Worth real investment here, not a
+  deprioritized stretch goal.
 
 ## Multi-task / auxiliary-signal block
 
-- KuaiRand logs 12 feedback signals total (click, like, follow, comment,
-  forward, hate, long_view, ...) but only click is scored. Auxiliary-task
-  transfer is a documented way to squeeze more signal out of sparse click
-  labels.
-- **ESMM (Entire Space Multi-task Model)**: jointly models CTR and CTCVR to
-  avoid sample-selection bias between a click model and a downstream
-  conversion model. Adaptable here as click + a stronger engagement signal
-  (e.g. long_view) sharing a bottom tower.
+- KuaiRand logs several feedback signals (`is_click`, `is_like`,
+  `is_follow`, `is_comment`, `is_forward`, `is_hate`, `play_time_ms`, ...)
+  but only `long_view` is scored (Tier 1). Per the organizers (Tier 1,
+  headroom item #3), auxiliary-task transfer using these unused signals is
+  untested territory worth exploring.
+- **ESMM (Entire Space Multi-task Model)**: jointly models two related
+  tasks to avoid sample-selection bias between them. Adaptable here as
+  `long_view` (primary) + `is_click` or `is_like` (auxiliary) sharing a
+  bottom tower.
 - **PLE (Progressive Layered Extraction)**: separates task-shared and
   task-specific experts explicitly, reducing negative transfer between
   loosely-related auxiliary tasks compared to a naive shared-bottom MMoE.

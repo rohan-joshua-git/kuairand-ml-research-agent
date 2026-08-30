@@ -41,7 +41,7 @@ from agent.logger import IterationRecord, RunLogger
 from agent.pitfall_store import PitfallStore
 from agent.skill_store.retriever import SkillRetriever
 from pipeline.data.loader import load_config, load_split
-from pipeline.evaluate import score_delta
+from pipeline.evaluate import RankingMetrics, score_delta
 from pipeline.train import run_training
 
 ITERATE_SYSTEM_PROMPT = """You are an ML engineer iterating on a recommender \
@@ -90,6 +90,13 @@ class Orchestrator:
         self.patience_n = self.cfg["starter_kit"]["patience_n"]
         self.wall_clock_cap_hours = self.cfg["starter_kit"]["wall_clock_cap_hours"]
 
+        # Task Requirement #1: "reproduce the official baseline" — the fixed
+        # target this run must reach, not just its own iteration-0 score.
+        ob = self.cfg["starter_kit"]["official_baseline"]["valid"]
+        self.official_baseline_valid = RankingMetrics(
+            gauc=ob["gauc"], ndcg_at_5=ob["ndcg_at_5"], n_users=0, n_users_gauc=0
+        )
+
         self._start_time = time.time()
 
     def _elapsed_hours(self) -> float:
@@ -98,10 +105,18 @@ class Orchestrator:
     def run(self) -> None:
         split = load_split(self.cfg)
 
-        print("[orchestrator] Training initial baseline (placeholder — swap for organizer baseline when available)...")
+        print("[orchestrator] Training initial pipeline...")
         current = run_training(split=split)
         best_metrics = current.val_metrics
         best_score = 0.0  # delta vs itself is 0 at iteration 0
+
+        baseline_primary = (self.official_baseline_valid.gauc + self.official_baseline_valid.ndcg_at_5) / 2.0
+        baseline_delta = score_delta(best_metrics, self.official_baseline_valid)
+        reached = "REACHED" if baseline_delta >= 0 else "BELOW"
+        print(
+            f"[orchestrator] vs official FM baseline (valid, primary={baseline_primary:.4f}): "
+            f"delta={baseline_delta:+.4f} [{reached}]"
+        )
 
         iterations_without_improvement = 0
         iteration = 0
@@ -191,7 +206,11 @@ class Orchestrator:
             new_metrics = train_result.val_metrics
 
             delta = score_delta(new_metrics, best_metrics)
-            print(f"[orchestrator] New metrics: GAUC={new_metrics.gauc:.4f}, nDCG@5={new_metrics.ndcg_at_5:.4f} (delta={delta:+.4f})")
+            baseline_delta = score_delta(new_metrics, self.official_baseline_valid)
+            print(
+                f"[orchestrator] New metrics: GAUC={new_metrics.gauc:.4f}, nDCG@5={new_metrics.ndcg_at_5:.4f} "
+                f"(delta vs prev best={delta:+.4f}, delta vs official baseline={baseline_delta:+.4f})"
+            )
 
             # Play 1: unbiased referee check, if enabled.
             referee_note = ""
@@ -242,6 +261,7 @@ class Orchestrator:
                         "gauc": new_metrics.gauc,
                         "ndcg_at_5": new_metrics.ndcg_at_5,
                         "delta_vs_prev_best": delta,
+                        "delta_vs_official_baseline": baseline_delta,
                         "accepted_as_new_best": is_new_best,
                     },
                     errors=errors,
