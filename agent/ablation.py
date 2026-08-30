@@ -30,6 +30,8 @@ class BlockVariant:
     block_name: str
     description: str
     kwargs_override: dict
+    editable_target: str  # key into agent.code_editor.EDITABLE_FILES — which
+    # file the orchestrator should target if this variant wins the ablation
 
 
 @dataclass
@@ -39,6 +41,7 @@ class AblationResult:
     val_metrics: RankingMetrics
     delta_gauc: float
     delta_ndcg: float
+    editable_target: str
 
 
 def default_block_variants() -> list[BlockVariant]:
@@ -47,19 +50,21 @@ def default_block_variants() -> list[BlockVariant]:
     blocks (e.g. once a debiasing block or multitask head exists, add
     variants that toggle them) — this function is a seed, not a fixed set.
 
-    No variant currently routes `orchestrator.py`'s editable-target picker
-    (`"label" in target.block_name`) to `pipeline/data/label.py` — the
-    former `label_resolution` variant tested `is_click` UI-mode conflation,
-    which stopped being meaningful once `long_view` (already a clean 0/1
-    column, per the Starter Kit) became the primary label instead of
-    `is_click`. That routing gap closes naturally once a real label-side
-    lever exists again (e.g. an `is_click` auxiliary-loss toggle once
-    multitask heads land — see `starter_kit/README.md` headroom item #3).
+    All current variants target `editable_target="train"` since they probe
+    `pipeline/train.py`'s hyperparameters (epoch count, learning rate, loss
+    weighting). Once the agent has edited `pipeline/data/features.py`,
+    `label.py`, or `pipeline/model/baseline.py` (all now in
+    `code_editor.EDITABLE_FILES` — see README "Confirmed by the Starter
+    Kit" / Limitations), it should add matching variants here so ablation
+    can route back to those files too, rather than defaulting to "train"
+    forever.
     """
     return [
-        BlockVariant("training_schedule", "more epochs", {"epochs": 6}),
-        BlockVariant("learning_rate", "lower learning rate", {"lr": 3e-4}),
-        BlockVariant("pos_class_weight", "upweight long_view positives via BCE pos_weight", {"pos_weight": 2.0}),
+        BlockVariant("training_schedule", "more epochs", {"epochs": 6}, editable_target="train"),
+        BlockVariant("learning_rate", "lower learning rate", {"lr": 3e-4}, editable_target="train"),
+        BlockVariant(
+            "pos_class_weight", "upweight long_view positives via BCE pos_weight", {"pos_weight": 2.0}, editable_target="train"
+        ),
     ]
 
 
@@ -85,6 +90,7 @@ def run_ablation(
                 val_metrics=m,
                 delta_gauc=m.gauc - baseline_metrics.gauc,
                 delta_ndcg=m.ndcg_at_5 - baseline_metrics.ndcg_at_5,
+                editable_target=variant.editable_target,
             )
         )
     return results

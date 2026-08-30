@@ -51,7 +51,16 @@ new file content, wrapped in a single ```python code fence. The file must \
 remain importable and preserve any function signatures other modules \
 depend on unless the hypothesis specifically requires changing them \
 (check the current file content you're given for what's referenced \
-elsewhere)."""
+elsewhere). If you're rewriting pipeline/train.py, `run_training(...)`'s \
+signature is called by agent/ablation.py and pipeline/smoke_test.py with \
+specific keyword arguments (split, epochs, lr, pos_weight, device) — \
+adding new keyword arguments is fine, removing or renaming existing ones \
+will break those callers. If you're rewriting pipeline/model/baseline.py, \
+`BaselineCTRModel`'s constructor is called from pipeline/train.py with \
+specific keyword arguments (n_users, n_videos, n_tabs, embed_dim, \
+numeric_dim) — changing that signature requires rewriting \
+pipeline/train.py's instantiation of it in the SAME iteration, or the \
+smoke test will fail and the patch will be rolled back."""
 
 REFLECT_SYSTEM_PROMPT = """You are the lead ML researcher directing an \
 iteration of an autonomous recommender-system research loop on \
@@ -160,8 +169,13 @@ class Orchestrator:
             hypothesis = hypothesis_resp.text.strip()
             print(f"[orchestrator] Hypothesis: {hypothesis}")
 
-            # 4. Iterate: write the code change.
-            editable_target = "features" if "label" not in target.block_name else "label"
+            # 4. Iterate: write the code change. Which file to target comes
+            # straight from the winning ablation variant (see
+            # agent/ablation.py::BlockVariant.editable_target) rather than
+            # guessing from the block's name — every entry in
+            # code_editor.EDITABLE_FILES is a legitimate target now that the
+            # engineer-features AND train+tune stages are both editable.
+            editable_target = target.editable_target
             current_code = EDITABLE_FILES[editable_target].read_text(encoding="utf-8")
             iterate_prompt = (
                 f"Hypothesis to implement: {hypothesis}\n\n"

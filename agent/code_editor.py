@@ -2,12 +2,26 @@
 Applies LLM-proposed whole-file rewrites to the editable pipeline surface,
 with backup/rollback and a subprocess smoke test before anything is kept.
 
-Editable surface is deliberately restricted to a small allowlist
-(`EDITABLE_FILES`) rather than "any file in the repo" — this keeps the
-blast radius of a bad LLM-generated patch contained to files the
-orchestrator knows how to sanity-check and roll back, which is what makes
-the "recovery, not failure count" robustness story in the README credible
-rather than aspirational.
+Editable surface is deliberately restricted to an allowlist (`EDITABLE_FILES`)
+rather than "any file in the repo" — this keeps the blast radius of a bad
+LLM-generated patch contained to files the orchestrator knows how to
+sanity-check and roll back, which is what makes the "recovery, not failure
+count" robustness story in the README credible rather than aspirational.
+
+Covers both Figure 1 stages that are "carried out almost entirely in code"
+per the challenge brief: engineer features (`features.py`, `label.py`) and
+train + tune (`train.py`, the loss/optimizer/schedule; `model/baseline.py`,
+the architecture). Each target is still a single whole-file rewrite per
+iteration — an agent that wants to change a model's constructor signature
+*and* how `train.py` instantiates it needs two coordinated iterations (or
+the hypothesis must fit within one file); a broken cross-file interface is
+caught by the smoke test and rolled back like any other bad patch, it just
+costs an iteration rather than corrupting state.
+
+`pipeline/model/architectures/` (new architecture variants as separate
+files, one per iteration lineage) is NOT wired in here — that needs a
+create-a-new-file flow this backup/restore-one-path mechanism doesn't
+support yet, unlike the fixed-path rewrites below.
 """
 from __future__ import annotations
 
@@ -22,6 +36,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 EDITABLE_FILES = {
     "features": REPO_ROOT / "pipeline" / "data" / "features.py",
     "label": REPO_ROOT / "pipeline" / "data" / "label.py",
+    "train": REPO_ROOT / "pipeline" / "train.py",
+    "model": REPO_ROOT / "pipeline" / "model" / "baseline.py",
 }
 
 
