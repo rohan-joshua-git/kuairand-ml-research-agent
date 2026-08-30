@@ -44,6 +44,13 @@ class TokenLedger:
     def total_tokens(self) -> int:
         return sum(v["input_tokens"] + v["output_tokens"] for v in self._by_model.values())
 
+    def restore(self, snapshot: dict) -> None:
+        """Replaces the running totals with a previously-saved snapshot
+        (see agent/checkpoint.py) — used when resuming a crashed run so
+        token accounting doesn't silently reset to zero and undercount
+        the Feasibility/Cost metric."""
+        self._by_model = {model: dict(counts) for model, counts in snapshot.items()}
+
 
 class LLMClient:
     def __init__(self, iteration_model: str, reflection_model: str, ledger: TokenLedger | None = None):

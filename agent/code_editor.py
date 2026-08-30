@@ -18,6 +18,14 @@ the hypothesis must fit within one file); a broken cross-file interface is
 caught by the smoke test and rolled back like any other bad patch, it just
 costs an iteration rather than corrupting state.
 
+Also includes `agent/ablation.py` itself — this is what makes ablation
+*targeting* fully autonomous rather than stuck with a fixed seed grid:
+`agent/orchestrator.py` periodically lets the agent rewrite its own
+ablation block-variant grid (see its `_maybe_grow_ablation_grid`), smoke
+tested by `agent/ablation_smoke_test.py` rather than
+`pipeline/smoke_test.py` since a broken ablation grid doesn't necessarily
+break pipeline training.
+
 `pipeline/model/architectures/` (new architecture variants as separate
 files, one per iteration lineage) is NOT wired in here — that needs a
 create-a-new-file flow this backup/restore-one-path mechanism doesn't
@@ -38,6 +46,7 @@ EDITABLE_FILES = {
     "label": REPO_ROOT / "pipeline" / "data" / "label.py",
     "train": REPO_ROOT / "pipeline" / "train.py",
     "model": REPO_ROOT / "pipeline" / "model" / "baseline.py",
+    "ablation": REPO_ROOT / "agent" / "ablation.py",
 }
 
 

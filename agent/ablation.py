@@ -45,19 +45,20 @@ class AblationResult:
 
 
 def default_block_variants() -> list[BlockVariant]:
-    """A starting ablation grid over train.py's exposed knobs. The agent is
-    expected to grow/replace this list over iterations as it introduces new
-    blocks (e.g. once a debiasing block or multitask head exists, add
-    variants that toggle them) — this function is a seed, not a fixed set.
+    """A starting ablation grid over train.py's exposed knobs — a seed, not
+    a fixed set. `agent/ablation.py` is itself in `code_editor.EDITABLE_FILES`,
+    and `agent/orchestrator.py`'s `_maybe_grow_ablation_grid` periodically
+    lets the agent rewrite this function directly (smoke tested by
+    `agent/ablation_smoke_test.py`), so the grid growing over time is a
+    property of the running agent, not something a human needs to seed by
+    hand after the fact.
 
     All current variants target `editable_target="train"` since they probe
     `pipeline/train.py`'s hyperparameters (epoch count, learning rate, loss
-    weighting). Once the agent has edited `pipeline/data/features.py`,
-    `label.py`, or `pipeline/model/baseline.py` (all now in
-    `code_editor.EDITABLE_FILES` — see README "Confirmed by the Starter
-    Kit" / Limitations), it should add matching variants here so ablation
-    can route back to those files too, rather than defaulting to "train"
-    forever.
+    weighting) — coverage for `features.py`, `label.py`, and
+    `model/baseline.py` is exactly the kind of gap grid growth is meant to
+    close as the agent edits those files and needs a way to ablate the
+    changes it makes there.
     """
     return [
         BlockVariant("training_schedule", "more epochs", {"epochs": 6}, editable_target="train"),
@@ -77,11 +78,26 @@ def run_ablation(
     current baseline_metrics. Callers should use a reduced `epochs` in the
     baseline run for this to stay cheap — ablation is meant to be a fast
     signal, not a full training run per block.
+
+    Each variant runs behind a try/except: `kwargs_override` is forwarded
+    straight to `run_training(**kwargs_override)`, and since the grid can
+    now be grown autonomously (agent/orchestrator.py's
+    `_maybe_grow_ablation_grid`, via `agent/ablation_smoke_test.py`), a
+    newly-added variant may reference a keyword `pipeline/train.py` doesn't
+    accept yet (e.g. the agent adds a `use_author_id` variant before it's
+    gotten around to teaching `run_training` that kwarg). A crash from one
+    bad variant must not take down the whole ablation round — it's simply
+    skipped, and `pipeline/train.py` catching up on a later iteration is
+    the self-correction, not a hard failure here.
     """
     variants = variants or default_block_variants()
     results = []
     for variant in variants:
-        train_result = run_training(split=split, **variant.kwargs_override)
+        try:
+            train_result = run_training(split=split, **variant.kwargs_override)
+        except Exception as e:  # noqa: BLE001 — see docstring: one bad variant must not crash the round
+            print(f"[ablation] variant {variant.block_name!r} failed, skipping: {e}")
+            continue
         m = train_result.val_metrics
         results.append(
             AblationResult(
@@ -96,9 +112,14 @@ def run_ablation(
     return results
 
 
-def pick_highest_impact_block(results: list[AblationResult]) -> AblationResult:
+def pick_highest_impact_block(results: list[AblationResult]) -> AblationResult | None:
     """Per README/Tier-1 guidance: the challenge scores an equal-weighted
     mean of GAUC delta and nDCG@5 delta, so rank on the combined (mean)
     delta rather than favoring either metric.
+
+    Returns None if every variant failed (see `run_ablation`) — callers
+    must handle that as a non-event for this round, not a crash.
     """
+    if not results:
+        return None
     return max(results, key=lambda r: (r.delta_gauc + r.delta_ndcg) / 2.0)

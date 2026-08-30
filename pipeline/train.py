@@ -127,8 +127,13 @@ def run_training(
     return TrainResult(model=model, id_maps=id_maps, val_metrics=val_metrics, epoch_losses=epoch_losses)
 
 
-def _evaluate_on_split(model: nn.Module, feat_df: pd.DataFrame, id_maps: dict, label: pd.Series, device: str) -> RankingMetrics:
-    ds = InteractionDataset(feat_df, id_maps, label)
+def score_split(model: nn.Module, feat_df: pd.DataFrame, id_maps: dict, device: str = "cpu") -> np.ndarray:
+    """Runs inference only (no labels needed) — shared by the val-scoring
+    path below and `agent/referee.py`'s unbiased-probe scoring, so there's
+    one implementation of "how does this model score a DataFrame of
+    (user, video, tab, numeric) rows" rather than two that could drift."""
+    dummy_label = pd.Series(0, index=feat_df.index, dtype="float32")
+    ds = InteractionDataset(feat_df, id_maps, dummy_label)
     loader = DataLoader(ds, batch_size=4096, shuffle=False)
 
     model.eval()
@@ -139,9 +144,12 @@ def _evaluate_on_split(model: nn.Module, feat_df: pd.DataFrame, id_maps: dict, l
                 user_ids.to(device), video_ids.to(device), tab_ids.to(device), numeric.to(device)
             )
             scores.append(torch.sigmoid(logits).cpu().numpy())
+    return np.concatenate(scores) if scores else np.array([])
 
+
+def _evaluate_on_split(model: nn.Module, feat_df: pd.DataFrame, id_maps: dict, label: pd.Series, device: str) -> RankingMetrics:
     eval_df = feat_df[["user_id"]].copy()
-    eval_df["score"] = np.concatenate(scores) if scores else np.array([])
+    eval_df["score"] = score_split(model, feat_df, id_maps, device)
     eval_df["label"] = label.to_numpy()
 
     return compute_ranking_metrics(eval_df)

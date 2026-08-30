@@ -42,7 +42,15 @@ class RunLogger:
         self.iteration_log_path = self.run_log_dir / "iterations.jsonl"
         self.intervention_log_path = Path(intervention_log_path)
         self.resource_usage_path = Path(resource_usage_path)
+        # Recovered from any existing log rather than reset to 0, so a
+        # crash-and-resume (see agent/checkpoint.py) doesn't undercount the
+        # graded Autonomy metric — interventions.jsonl is append-only and
+        # already survives a crash on disk, this just makes the in-memory
+        # counter agree with it.
         self._intervention_count = 0
+        if self.intervention_log_path.exists():
+            with open(self.intervention_log_path, "r", encoding="utf-8") as f:
+                self._intervention_count = sum(1 for line in f if line.strip())
 
     def log_iteration(self, record: IterationRecord) -> None:
         with open(self.iteration_log_path, "a", encoding="utf-8") as f:

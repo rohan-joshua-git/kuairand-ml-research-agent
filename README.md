@@ -21,8 +21,10 @@ This is a working, runnable scaffold, not a finished benchmarked agent.
 | Piece | Status | Note |
 |---|---|---|
 | End-to-end loop | Implemented | Runs on real KuaiRand-Pure data, tracked against the vendored official FM baseline (`starter_kit/`, `config.starter_kit.official_baseline`). See [Confirmed by the Starter Kit](#confirmed-by-the-starter-kit). |
-| Self-editing code | Implemented | Real API calls, scoped to `pipeline/data/features.py`, `pipeline/data/label.py`, `pipeline/train.py`, and `pipeline/model/baseline.py`, with automatic rollback on a failed smoke test. See [Limitations](#limitations) — ablation currently only routes to `train.py`. |
-| Unbiased referee | Planned | Scoring, propensity estimation, and divergence tracking are implemented and tested in isolation, not yet wired into the live per-iteration loop. |
+| Self-editing code | Implemented | Real API calls, scoped to `pipeline/data/features.py`, `pipeline/data/label.py`, `pipeline/train.py`, `pipeline/model/baseline.py`, and `agent/ablation.py` itself, with automatic rollback on a failed smoke test and in-process module reloading so a scored patch is actually the code that gets scored (`agent/orchestrator.py::_reload_editable_modules`). |
+| Autonomous ablation targeting | Implemented | The agent periodically rewrites its own ablation block-variant grid (`agent/orchestrator.py::_maybe_grow_ablation_grid`), not just a fixed human-seeded set — see [Limitations](#limitations) for what's still a fixed seed. |
+| Unbiased referee | Implemented | Wired into the live per-iteration loop — every accepted patch's trained model is scored against a cached sample of the random-exposure log, with divergence alerts feeding the pitfall store (`agent/referee.py`, `agent/orchestrator.py::_referee_check`). |
+| Crash recovery | Implemented | `agent/checkpoint.py` snapshots editable files + run state (iteration, best metrics, elapsed wall-clock, token usage) on every accepted patch; `orchestrator.py` resumes from the last checkpoint on startup instead of restarting from iteration 0. This also fixed a real correctness bug — a patch that scored worse or failed the compression gate previously stayed on disk unreverted, so later iterations silently trained against it while `best_metrics` drifted out of sync with the actual code. |
 | Submission writer | Implemented | `pipeline/submit.py` writes the confirmed `row_id,user_id,video_id,score` CSV format (see `starter_kit/submit.py`). |
 
 ## Architecture
@@ -37,9 +39,11 @@ This is a working, runnable scaffold, not a finished benchmarked agent.
                                    the score?
 ```
 
-**Ablation-first refinement.** Instead of rewriting the whole pipeline each round, `agent/ablation.py` runs a cheap ablation over pipeline blocks (training schedule, learning rate, positive-class weighting) to find which one is moving the score, and `agent/orchestrator.py` targets that block for the next LLM-driven code change. `agent/skill_store/` holds domain knowledge in three tiers: Tier 1 (always loaded, dataset-specific quirks), Tier 2 (RecSys method priors, loaded when relevant), Tier 3 (deep dives, loaded on demand via keyword match in `agent/skill_store/retriever.py`). This follows results from MLE-STAR and HASTE showing ablation-guided, tiered-knowledge search outperforms flat knowledge-dumping and whole-pipeline rewrites.
+**Ablation-first refinement.** Instead of rewriting the whole pipeline each round, `agent/ablation.py` runs a cheap ablation over pipeline blocks (training schedule, learning rate, positive-class weighting) to find which one is moving the score, and `agent/orchestrator.py` targets that block for the next LLM-driven code change. `agent/ablation.py` is itself an editable file — every `agent.ablation_grid_growth_interval` iterations (config, default 5), the agent gets a chance to rewrite its own block-variant grid (`Orchestrator._maybe_grow_ablation_grid`, smoke tested by `agent/ablation_smoke_test.py`), so grid coverage isn't capped at whatever a human seeded it with. A variant that references a training knob that doesn't exist yet is skipped, not a crash (`run_ablation`'s per-variant exception handling) — the self-correction is a later patch teaching `pipeline/train.py` that knob. `agent/skill_store/` holds domain knowledge in three tiers: Tier 1 (always loaded, dataset-specific quirks), Tier 2 (RecSys method priors, loaded when relevant), Tier 3 (deep dives, loaded on demand via keyword match in `agent/skill_store/retriever.py`). This follows results from MLE-STAR and HASTE showing ablation-guided, tiered-knowledge search outperforms flat knowledge-dumping and whole-pipeline rewrites.
 
-**Unbiased referee.** `log_random_4_22_to_5_08_pure.csv` contains ~1.19M interactions from uniformly random exposure, undocumented in the challenge brief. `agent/referee.py` scores candidates against this log alongside standard validation and tracks the gap between the two; a widening gap signals the agent is fitting the biased proxy rather than improving generally.
+**Unbiased referee.** `log_random_4_22_to_5_08_pure.csv` contains ~1.19M interactions from uniformly random exposure, undocumented in the challenge brief. After every accepted patch's training run, `agent/orchestrator.py::_referee_check` scores that run's model against a cached sample of this log (`config.referee.probe_sample_size`, default 20k rows) and tracks the gap against standard validation; a widening gap signals the agent is fitting the biased proxy rather than improving generally, and gets recorded as a pitfall so it feeds the next iteration's reflect+revise prompt.
+
+**Checkpointing.** `agent/checkpoint.py` snapshots every editable file plus run state (iteration count, best metrics, elapsed wall-clock, token usage) whenever a patch is accepted as the new best. Every other outcome (not a new best, or a new best that fails the compression gate) reverts the on-disk files to that snapshot — so the pipeline the next iteration's ablation and training run against always matches `best_metrics` exactly, and a crashed run can resume from the same snapshot on restart instead of losing the whole run.
 
 **Compression gate.** `agent/compression_gate.py` compresses a winning approach into a short summary and hands it to a fresh LLM context with no memory of the search and no access to validation scores. If that reproducer can't get behind the approach, the checkpoint is rejected and the previous best is kept. This targets a known failure mode where agents pick a validation-overfit artifact over a genuinely weaker-looking but real solution.
 
@@ -75,11 +79,13 @@ pipeline/                 the RecSys ML pipeline; what the agent edits
   submit.py                    writes the confirmed row_id,user_id,video_id,score submission CSV
 
 agent/                    the autonomous agent
-  llm_client.py             Anthropic API wrapper + token accounting
-  orchestrator.py            main loop
-  ablation.py                 block-level ablation
+  llm_client.py             Anthropic API wrapper + token accounting (TokenLedger, resumable)
+  orchestrator.py            main loop — reload discipline, checkpointing, referee + grid-growth wiring
+  checkpoint.py                editable-file + run-state snapshots; crash resume
+  ablation.py                 block-level ablation; itself agent-editable (autonomous grid growth)
+  ablation_smoke_test.py       dedicated smoke test for agent/ablation.py edits
   code_editor.py               applies LLM-written patches with smoke-test rollback
-  referee.py                    unbiased scoring via the random-exposure log
+  referee.py                    unbiased scoring via the random-exposure log, wired into the live loop
   compression_gate.py            overfit-rejection check before finalizing
   pitfall_store.py                structured failure/recovery log (feeds Tier-1 context)
   logger.py                        per-iteration run log, intervention counter, resource usage
@@ -92,7 +98,7 @@ agent/                    the autonomous agent
 
 config/agent_config.yaml   all tunables and organizer-dependent values, isolated in one place
 docs/                       results_table.md (generated), devpost_writeup.md (draft)
-logs/                       generated at runtime: iterations.jsonl, interventions.jsonl, pitfalls.json, resource_usage.json
+logs/                       generated at runtime: iterations.jsonl, interventions.jsonl, pitfalls.json, resource_usage.json, checkpoint/ (crash-resume state)
 ```
 
 ## Setup
@@ -120,7 +126,8 @@ cd starter_kit && python3 baseline.py --data_dir ../data/raw --model fm   # ~20s
 | Command | Purpose |
 |---|---|
 | `python -m pipeline.train` | Sanity-check the pipeline's own model runs end-to-end |
-| `python -m agent.orchestrator` | Run the full autonomous agent loop |
+| `python -m agent.orchestrator` | Run the full autonomous agent loop — resumes from `logging.checkpoint_dir` automatically if a previous run left one |
+| `python -m agent.orchestrator --fresh` | Same, but discards any existing checkpoint first (see Limitations re: what `--fresh` doesn't reset) |
 | `python -m agent.report` | Generate `docs/results_table.md` and a resource-usage summary from the run log |
 | `python -m scripts.test_logic` | Non-ML logic checks (label resolution, leakage guard, metrics parity) against real data |
 
@@ -141,11 +148,13 @@ Answered — no longer open questions:
 
 ## Limitations
 
-- **Editable surface covers both code-heavy Figure 1 stages, but ablation only routes to `train.py` so far.** `agent/code_editor.py`'s `EDITABLE_FILES` now includes `pipeline/data/features.py`, `pipeline/data/label.py`, `pipeline/train.py` (loss/optimizer/schedule), and `pipeline/model/baseline.py` (architecture) — the agent can act on the Starter Kit's top headroom suggestion (a pairwise/listwise ranking loss) by rewriting `train.py`. What's still missing: `agent/ablation.py`'s seed block-variant grid only probes `train.py` hyperparameters, so `pick_highest_impact_block` never routes to `features.py`/`label.py`/`model/baseline.py` until the agent adds variants targeting them itself (see `default_block_variants`'s docstring) — and `agent/ablation.py` isn't itself in `EDITABLE_FILES`, so that has to happen through some other mechanism, not yet designed. `pipeline/model/architectures/` (new architecture variants as separate per-iteration files) also isn't wired in — `code_editor.py`'s backup/restore-one-path mechanism only supports rewriting a fixed existing path, not creating new files.
-- **Referee's live per-iteration wiring is partial.** The scoring logic and divergence math (`agent/referee.py`) are implemented and tested in isolation, but `orchestrator.py` doesn't yet run inference over the random-exposure log every iteration; the integration point is marked explicitly in the code (`referee_note` in `orchestrator.py`).
+- **Ablation grid growth is still constrained by what `run_training` already accepts.** `agent/ablation.py`'s seed grid only probes `train.py` hyperparameters (epochs, learning rate, positive-class weight); the agent can add coverage for `features.py`/`label.py`/`model/baseline.py` via grid growth, but a new BlockVariant can only forward keyword arguments `run_training` already understands — a variant that invents a new one is skipped gracefully (not a crash) until a *separate* patch to `train.py` teaches it that keyword. Growing the grid and extending `train.py`'s knob surface aren't coordinated in one step; closing that gap across iterations is left to the agent's own reflect+revise loop, not guaranteed by construction.
+- **`pipeline/model/architectures/` (new architecture variants as separate per-iteration files) isn't wired in.** `code_editor.py`'s backup/restore-one-path mechanism only supports rewriting a fixed existing path, not creating new files — an agent-proposed new architecture has to land inside the single `pipeline/model/baseline.py` file for now.
+- **Tier-A referee mode (training directly on the random-exposure log) isn't implemented.** What's wired in (`agent/referee.py`, `Orchestrator._referee_check`) is Tier-B: diagnostic scoring against a cached probe sample, alerting on divergence. Using the random log as actual training data remains gated on organizer confirmation (see Open questions).
 - **No GPU-hour tracking beyond wall-clock.** `logger.py` reports wall-clock time as a proxy; real GPU-hour accounting (e.g. via `nvidia-smi` polling) isn't wired in — not that it matters much, since the Starter Kit's own reference pipeline needs no GPU at all.
 - **This pipeline's own model (`pipeline/model/baseline.py`) is a starting point, not the scored baseline.** Per the challenge brief, "any starter pipeline the agent builds for itself is an internal step, not the reference it is scored against" — the reference is the vendored `starter_kit/baseline.py` (FM) and its numbers in `config.starter_kit.official_baseline`. This pipeline's own model exists so the agent has something to iterate on from iteration 0.
+- **`--fresh` only clears checkpoint bookkeeping, not the editable files themselves.** If a previous run left `pipeline/train.py` etc. mid-experiment and you want a truly clean slate (not just a fresh iteration counter), restore those files via git (e.g. `git checkout -- pipeline agent/ablation.py`) before starting.
 
 ---
 
-In one line: an ablation-guided agent that edits its own feature and label code against KuaiRand-Pure, checked against an unbiased random-exposure log and a fresh-context reproduction gate before any result counts as real.
+In one line: an ablation-guided agent that edits its own feature, label, training, and model code (and its own ablation grid) against real KuaiRand-Pure data, checked against an unbiased random-exposure log and a fresh-context reproduction gate before any result counts as real, with crash-resumable checkpointing so a 6-hour run surviving to convergence doesn't depend on nothing going wrong.

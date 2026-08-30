@@ -45,9 +45,12 @@ starter_kit:
 
 # Play 1 (Unbiased Referee) — Tier A/B toggle depends on organizer answer to
 # "is log_random permitted for training, propensity-only, or not at all?"
+# Wired into the live per-iteration loop — see agent/referee.py, called
+# from agent/orchestrator.py after every accepted patch's training run.
 referee:
   mode: "tier_b"   # "tier_a" = train directly on random log | "tier_b" = propensity/diagnostics only | "disabled"
   divergence_alert_threshold: 0.05   # biased-vs-unbiased score gap that triggers a reflect+revise flag
+  probe_sample_size: 20000   # sampled once per run (fixed seed) from the 1.19M-row random log, to keep the per-iteration check cheap
 
 compression_gate:
   enabled: true
@@ -59,6 +62,7 @@ agent:
     iteration_model: "claude-sonnet-5"   # cheap, high-volume: writes code diffs, runs ablations
     reflection_model: "claude-opus-5"    # expensive, low-volume: ideation, reflect+revise, final report synthesis
   max_iterations: 50            # challenge brief's iteration cap
+  ablation_grid_growth_interval: 5   # every N iterations, let the agent rewrite agent/ablation.py's own block-variant grid — see Orchestrator._maybe_grow_ablation_grid. 0/null disables.
   skill_store:
     tier1_path: "./agent/skill_store/tier1_core.md"
     tier2_path: "./agent/skill_store/tier2_domain.md"
@@ -68,3 +72,4 @@ logging:
   run_log_dir: "./logs"
   intervention_log: "./logs/interventions.jsonl"
   resource_usage_report: "./logs/resource_usage.json"
+  checkpoint_dir: "./logs/checkpoint"   # agent/checkpoint.py — editable-file snapshots + run state, enables crash resume

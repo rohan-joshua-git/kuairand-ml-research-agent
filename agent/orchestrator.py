@@ -6,7 +6,11 @@ Main agent loop — implements Figure 1 end to end:
 
 Each iteration:
   1. `ablation.py` identifies which pipeline block is the current
-     bottleneck (using cheap, reduced-scale runs).
+     bottleneck (using cheap, reduced-scale runs). Every
+     `ablation_grid_growth_interval` iterations, the agent first gets a
+     chance to rewrite `ablation.py`'s own block-variant grid — see
+     `_maybe_grow_ablation_grid` — so ablation *targeting* isn't stuck
+     with a fixed seed grid a human has to keep extending by hand.
   2. `skill_store/retriever.py` pulls in only the domain knowledge relevant
      to that block (Tier 1 always, Tier 2/3 keyed to the target).
   3. The reflection model proposes a hypothesis for that block.
@@ -14,27 +18,47 @@ Each iteration:
      the hypothesis, targeting one of `code_editor.EDITABLE_FILES`.
   5. `code_editor.py` applies it behind a subprocess smoke test with
      automatic rollback on failure — a bad patch never corrupts state.
-  6. On success, a full training run scores the change on validation
-     (and, if enabled, `referee.py`'s unbiased probe).
+  6. On success, in-process modules are reloaded (`_reload_editable_modules`)
+     so the very training run that scores the patch actually runs the new
+     code — `from x import y` only snapshots `y` at import time, so
+     without this, an applied patch would silently keep being scored
+     against its own pre-patch behavior. A full training run then scores
+     the change on validation, plus `referee.py`'s unbiased probe if
+     enabled.
   7. Every iteration is logged (`logger.py`) with hypothesis, diff summary,
      metrics, and any error/recovery — regardless of whether it improved
      anything, since the graded run log needs the full trajectory, not
      just the wins.
   8. A new best checkpoint must pass `compression_gate.py` before being
-     designated the final candidate.
+     designated the final candidate. Whether it passes or not, the
+     iteration ends with the on-disk editable files matching
+     `best_metrics` exactly (`checkpoint.py`) — a pass snapshots the new
+     state as the checkpoint, anything else restores the files to the
+     last snapshot, so the pipeline never silently drifts on a patch that
+     didn't actually help.
   9. The loop stops at convergence (no improvement > epsilon for N
      iterations), at `agent.max_iterations`, or at the wall-clock cap —
      whichever comes first, per config.
+
+`checkpoint.py` also makes a crashed run resumable: `run()` checks for an
+existing checkpoint on startup and, if found, restores the editable files
+and run state (iteration count, best metrics, elapsed wall-clock, token
+usage) instead of starting over from iteration 0.
 
 This module makes real Anthropic API calls and runs real training — there
 is no mocked/offline mode. See README for how to run it.
 """
 from __future__ import annotations
 
+import argparse
+import importlib
+import sys
 import time
+from dataclasses import asdict
 
 from agent import compression_gate, referee
 from agent.ablation import pick_highest_impact_block, run_ablation
+from agent.checkpoint import CheckpointManager, RunState
 from agent.code_editor import EDITABLE_FILES, apply_and_smoke_test, extract_code
 from agent.llm_client import LLMClient, TokenLedger
 from agent.logger import IterationRecord, RunLogger
@@ -70,6 +94,20 @@ hypothesis for the next code change. Be concrete: name the exact \
 mechanism (e.g. "add an auxiliary long_view loss with weight 0.3", not \
 "try multitask learning"). One or two sentences."""
 
+GROW_ABLATION_SYSTEM_PROMPT = """You maintain the ablation grid \
+(agent/ablation.py) for an autonomous ML research loop on KuaiRand-Pure. \
+Given the current grid contents and pipeline/train.py's run_training(...) \
+signature, add ONE new BlockVariant to default_block_variants() that \
+probes something not yet covered — or, if you see a concrete flaw in \
+pick_highest_impact_block's selection logic, fix that instead. You may \
+ONLY use keyword arguments that already exist in run_training's current \
+signature (shown below); inventing a new one is not an error (a bad \
+variant is skipped gracefully, not a crash) but it won't produce a useful \
+signal until pipeline/train.py separately learns to accept it. Preserve \
+every existing BlockVariant unless you have a specific reason to remove \
+one. Output ONLY the complete new file content for agent/ablation.py, \
+wrapped in a single ```python code fence."""
+
 
 class Orchestrator:
     def __init__(self, cfg: dict | None = None):
@@ -93,8 +131,13 @@ class Orchestrator:
             tier2_path=agent_cfg["skill_store"]["tier2_path"],
             tier3_dir=agent_cfg["skill_store"]["tier3_dir"],
         )
+        self.checkpoint = CheckpointManager(
+            checkpoint_dir=self.cfg["logging"]["checkpoint_dir"],
+            editable_files=EDITABLE_FILES,
+        )
 
         self.max_iterations = agent_cfg["max_iterations"]
+        self.grid_growth_interval = agent_cfg.get("ablation_grid_growth_interval") or 0
         self.epsilon = self.cfg["starter_kit"]["epsilon"]
         self.patience_n = self.cfg["starter_kit"]["patience_n"]
         self.wall_clock_cap_hours = self.cfg["starter_kit"]["wall_clock_cap_hours"]
@@ -106,29 +149,209 @@ class Orchestrator:
             gauc=ob["gauc"], ndcg_at_5=ob["ndcg_at_5"], n_users=0, n_users_gauc=0
         )
 
+        # Bound methods refreshed by _reload_editable_modules() after every
+        # applied patch — see module docstring for why this is necessary.
+        self.run_training = run_training
+        self.run_ablation = run_ablation
+        self.pick_highest_impact_block = pick_highest_impact_block
+
+        self._referee_probe_df = None  # lazily loaded + cached, see _referee_check
+
         self._start_time = time.time()
 
     def _elapsed_hours(self) -> float:
         return (time.time() - self._start_time) / 3600.0
 
+    _RELOAD_MODULE_ORDER = (
+        "pipeline.data.features",
+        "pipeline.data.label",
+        "pipeline.model.baseline",
+        "pipeline.train",
+        "agent.ablation",
+    )
+
+    def _reload_editable_modules(self) -> None:
+        """Drop and re-import every module `code_editor.EDITABLE_FILES` can
+        point the agent at, in dependency order, and rebind this instance's
+        references to them.
+
+        `from x import y` only binds `y` to whatever object `x.y` was AT
+        IMPORT TIME. Overwriting x.py on disk (what `code_editor.py` does
+        on every applied patch) has no effect on an already-bound name
+        without picking the new code up somehow. Without this method,
+        every "full training run to score the change" after the very
+        first patch would silently keep running the pre-patch code — the
+        smoke test (a fresh subprocess) would correctly validate the new
+        code, but the in-process scoring step that decides whether the
+        patch becomes the new best would not, making the entire
+        optimization loop not actually test what it just wrote.
+
+        Uses `sys.modules.pop` + fresh `import_module`, not
+        `importlib.reload` — reload() re-executes a module's source into
+        its EXISTING namespace rather than a clean one, so a name defined
+        by an older version and no longer assigned by the new version
+        stays sitting in the module's `__dict__` as a stale leftover.
+        Harmless for the common case (an unused dangling function/constant
+        just wastes a little memory), but it can mask a real bug: if a
+        patch renames a helper without updating every call site, the
+        rename should be a clear NameError — reload() would instead
+        silently resolve the old call to the still-present stale helper.
+        Popping first and re-importing gives each module a genuinely
+        fresh namespace, so a patch is only ever scored against what its
+        own current source actually defines.
+        """
+        for mod_name in self._RELOAD_MODULE_ORDER:
+            sys.modules.pop(mod_name, None)
+        for mod_name in self._RELOAD_MODULE_ORDER:
+            importlib.import_module(mod_name)
+
+        from agent.ablation import pick_highest_impact_block as _pick, run_ablation as _ra
+        from pipeline.train import run_training as _rt
+
+        self.run_training = _rt
+        self.run_ablation = _ra
+        self.pick_highest_impact_block = _pick
+
+    def _save_checkpoint(
+        self, iteration: int, iterations_without_improvement: int, best_score: float, best_metrics: RankingMetrics
+    ) -> None:
+        self.checkpoint.save(
+            RunState(
+                iteration=iteration,
+                iterations_without_improvement=iterations_without_improvement,
+                best_score=best_score,
+                best_metrics=asdict(best_metrics),
+                elapsed_hours_at_checkpoint=self._elapsed_hours(),
+                token_usage_by_model=self.ledger.as_dict(),
+                saved_at=time.time(),
+            )
+        )
+
+    def _revert_to_checkpoint(self) -> None:
+        """Undoes an applied-but-not-accepted patch: restores every
+        editable file to the last checkpointed (known-best) content and
+        reloads in-process modules to match, so the next iteration starts
+        clean rather than silently building on a patch that didn't help."""
+        self.checkpoint.restore_files()
+        self._reload_editable_modules()
+
+    def _maybe_grow_ablation_grid(
+        self,
+        iteration: int,
+        iterations_without_improvement: int,
+        best_score: float,
+        best_metrics: RankingMetrics,
+    ) -> None:
+        """Every `ablation_grid_growth_interval` iterations, let the agent
+        rewrite its own ablation block-variant grid — see module docstring.
+        Always kept on success (checkpointed immediately, using the
+        CURRENT best_metrics/state passed in — growth doesn't change the
+        score) regardless of whether the current iteration's main patch
+        ends up accepted, since grid growth isn't a scored pipeline
+        change, it's a search-strategy change with its own dedicated
+        validity check.
+        """
+        if not self.grid_growth_interval or iteration % self.grid_growth_interval != 0:
+            return
+
+        print(f"[orchestrator] Iteration {iteration}: attempting to grow the ablation grid...")
+        current_code = EDITABLE_FILES["ablation"].read_text(encoding="utf-8")
+        train_code = EDITABLE_FILES["train"].read_text(encoding="utf-8")
+        prompt = (
+            f"Current agent/ablation.py:\n```python\n{current_code}\n```\n\n"
+            f"Current pipeline/train.py (for its run_training(...) signature):\n"
+            f"```python\n{train_code}\n```"
+        )
+        resp = self.llm.iterate(system=GROW_ABLATION_SYSTEM_PROMPT, prompt=prompt, max_tokens=8192)
+        new_code = extract_code(resp.text)
+
+        result = apply_and_smoke_test("ablation", new_code, smoke_test_module="agent.ablation_smoke_test")
+        if result.applied:
+            self._reload_editable_modules()
+            self._save_checkpoint(iteration, iterations_without_improvement, best_score, best_metrics)
+            print("[orchestrator] Ablation grid grown successfully — checkpointed.")
+        else:
+            print(f"[orchestrator] Ablation grid growth patch failed its smoke test, kept previous grid: {result.error}")
+            self.pitfalls.record(
+                id=f"ablation_grid_growth_fail_{iteration}",
+                symptom=f"iteration {iteration}: ablation grid growth patch failed its smoke test: {result.error}",
+                root_cause=result.smoke_test_output[-500:],
+                recovery="rolled back automatically via code_editor.py",
+                stage="engineer",
+                iteration=iteration,
+            )
+
+    def _referee_check(self, iteration: int, biased_metrics: RankingMetrics, model, id_maps: dict) -> str:
+        """Scores `model` against the unbiased random-exposure probe and
+        returns a short note for the iteration log. Never raises — a
+        referee failure is diagnostic, not fatal to the run."""
+        if not referee.referee_enabled(self.cfg):
+            return ""
+        try:
+            if self._referee_probe_df is None:
+                self._referee_probe_df = referee.load_probe_sample(self.cfg)
+            probe_scored = referee.score_probe_with_model(model, id_maps, self._referee_probe_df, self.cfg)
+            report = referee.build_referee_report(biased_metrics, probe_scored, self.cfg)
+            note = (
+                f"referee: unbiased GAUC={report.unbiased_metrics.gauc:.4f} "
+                f"nDCG@5={report.unbiased_metrics.ndcg_at_5:.4f} "
+                f"(div_gauc={report.divergence_gauc:+.4f} div_ndcg={report.divergence_ndcg:+.4f})"
+            )
+            if report.alert:
+                note += " ALERT: diverging from unbiased probe, possible overfit to biased validation"
+                self.pitfalls.record(
+                    id=f"referee_alert_{iteration}",
+                    symptom=(
+                        f"iteration {iteration}: validation score diverges from the unbiased random-log "
+                        f"probe by more than {self.cfg['referee']['divergence_alert_threshold']}"
+                    ),
+                    root_cause=(
+                        f"biased GAUC={biased_metrics.gauc:.4f} vs unbiased GAUC={report.unbiased_metrics.gauc:.4f}; "
+                        f"biased nDCG@5={biased_metrics.ndcg_at_5:.4f} vs unbiased nDCG@5={report.unbiased_metrics.ndcg_at_5:.4f}"
+                    ),
+                    recovery="flagged for the next reflect+revise step, not auto-reverted — see agent/referee.py",
+                    stage="evaluate",
+                    iteration=iteration,
+                )
+            return note
+        except Exception as e:  # noqa: BLE001 — diagnostic only, must never crash the loop
+            return f"referee check skipped due to error: {e}"
+
     def run(self) -> None:
         split = load_split(self.cfg)
 
-        print("[orchestrator] Training initial pipeline...")
-        current = run_training(split=split)
-        best_metrics = current.val_metrics
-        best_score = 0.0  # delta vs itself is 0 at iteration 0
+        if self.checkpoint.exists():
+            print("[orchestrator] Found an existing checkpoint — resuming...")
+            state = self.checkpoint.load_state()
+            self.checkpoint.restore_files()
+            self._reload_editable_modules()
+            best_metrics = RankingMetrics(**state.best_metrics)
+            best_score = state.best_score
+            iteration = state.iteration
+            iterations_without_improvement = state.iterations_without_improvement
+            self._start_time = time.time() - state.elapsed_hours_at_checkpoint * 3600.0
+            self.ledger.restore(state.token_usage_by_model)
+            print(
+                f"[orchestrator] Resumed at iteration {iteration} "
+                f"(elapsed {state.elapsed_hours_at_checkpoint:.2f}h), "
+                f"best GAUC={best_metrics.gauc:.4f} nDCG@5={best_metrics.ndcg_at_5:.4f}"
+            )
+        else:
+            print("[orchestrator] Training initial pipeline...")
+            current = self.run_training(split=split)
+            best_metrics = current.val_metrics
+            best_score = 0.0  # delta vs itself is 0 at iteration 0
+            iteration = 0
+            iterations_without_improvement = 0
 
-        baseline_primary = (self.official_baseline_valid.gauc + self.official_baseline_valid.ndcg_at_5) / 2.0
-        baseline_delta = score_delta(best_metrics, self.official_baseline_valid)
-        reached = "REACHED" if baseline_delta >= 0 else "BELOW"
-        print(
-            f"[orchestrator] vs official FM baseline (valid, primary={baseline_primary:.4f}): "
-            f"delta={baseline_delta:+.4f} [{reached}]"
-        )
-
-        iterations_without_improvement = 0
-        iteration = 0
+            baseline_primary = (self.official_baseline_valid.gauc + self.official_baseline_valid.ndcg_at_5) / 2.0
+            baseline_delta = score_delta(best_metrics, self.official_baseline_valid)
+            reached = "REACHED" if baseline_delta >= 0 else "BELOW"
+            print(
+                f"[orchestrator] vs official FM baseline (valid, primary={baseline_primary:.4f}): "
+                f"delta={baseline_delta:+.4f} [{reached}]"
+            )
+            self._save_checkpoint(iteration, iterations_without_improvement, best_score, best_metrics)
 
         while iteration < self.max_iterations:
             if self._elapsed_hours() >= self.wall_clock_cap_hours:
@@ -139,13 +362,27 @@ class Orchestrator:
             print(f"\n[orchestrator] === Iteration {iteration}/{self.max_iterations} "
                   f"(elapsed {self._elapsed_hours():.2f}h / {self.wall_clock_cap_hours}h) ===")
 
+            self._maybe_grow_ablation_grid(iteration, iterations_without_improvement, best_score, best_metrics)
+
             errors: list[str] = []
             recovery_actions: list[str] = []
 
             # 1. Ablation: which block is the bottleneck right now?
             print("[orchestrator] Running ablation...")
-            ablation_results = run_ablation(split, best_metrics)
-            target = pick_highest_impact_block(ablation_results)
+            ablation_results = self.run_ablation(split, best_metrics)
+            target = self.pick_highest_impact_block(ablation_results)
+            if target is None:
+                print("[orchestrator] Every ablation variant failed this round — skipping to next iteration.")
+                self.pitfalls.record(
+                    id=f"ablation_all_failed_{iteration}",
+                    symptom="every BlockVariant in the current ablation grid raised an exception this round",
+                    root_cause="see agent/ablation.py::run_ablation's per-variant exception handling for details",
+                    recovery="skipped this iteration's pipeline-file patch; a later grid-growth or train.py "
+                    "edit should self-correct whatever kwarg mismatch caused this",
+                    stage="engineer",
+                    iteration=iteration,
+                )
+                continue  # doesn't count toward patience — mirrors smoke-test-failure treatment below
             print(f"[orchestrator] Ablation target: {target.block_name} ({target.description})")
 
             # 2. Pull tiered domain knowledge relevant to this target.
@@ -214,9 +451,12 @@ class Orchestrator:
                 )
                 continue  # doesn't count toward patience — a rejected patch isn't "no improvement," it's a non-event
 
-            # 6. Full training run to score the accepted change.
+            # 6. Reload in-process modules so the training run below actually
+            # exercises the patch just applied (see _reload_editable_modules),
+            # then score it.
             print("[orchestrator] Patch accepted by smoke test. Running full training...")
-            train_result = run_training(split=split)
+            self._reload_editable_modules()
+            train_result = self.run_training(split=split)
             new_metrics = train_result.val_metrics
 
             delta = score_delta(new_metrics, best_metrics)
@@ -227,16 +467,7 @@ class Orchestrator:
             )
 
             # Play 1: unbiased referee check, if enabled.
-            referee_note = ""
-            if referee.referee_enabled(self.cfg):
-                try:
-                    # NOTE: wiring a live scored-candidates DataFrame through the
-                    # referee requires per-iteration inference over the random
-                    # log; left as an explicit integration point rather than
-                    # faked here. See README "Extension points".
-                    referee_note = "referee enabled (mode=%s) — see README for wiring inference through the probe" % self.cfg["referee"]["mode"]
-                except Exception as e:  # noqa: BLE001
-                    referee_note = f"referee check skipped due to error: {e}"
+            referee_note = self._referee_check(iteration, new_metrics, train_result.model, train_result.id_maps)
 
             is_new_best = delta > self.epsilon
 
@@ -249,21 +480,25 @@ class Orchestrator:
                     best_metrics = new_metrics
                     best_score = delta
                     iterations_without_improvement = 0
-                    print(f"[orchestrator] New best accepted (compression gate PASSED).")
+                    self._save_checkpoint(iteration, iterations_without_improvement, best_score, best_metrics)
+                    print(f"[orchestrator] New best accepted (compression gate PASSED) — checkpointed.")
                 else:
-                    recovery_actions.append("compression gate rejected the checkpoint — kept previous best")
+                    recovery_actions.append("compression gate rejected the checkpoint — reverted to previous best on disk")
                     self.pitfalls.record(
                         id=f"compression_gate_fail_{iteration}",
                         symptom=f"iteration {iteration} scored a new best but failed the compression gate",
                         root_cause=gate_result.reasoning[:500],
-                        recovery="rejected; previous best checkpoint retained as final candidate",
+                        recovery="rejected; on-disk editable files reverted to previous best checkpoint",
                         stage="evaluate",
                         iteration=iteration,
                     )
                     iterations_without_improvement += 1
-                    print("[orchestrator] New best REJECTED by compression gate — likely overfit. Reverting to previous best.")
+                    self._revert_to_checkpoint()
+                    print("[orchestrator] New best REJECTED by compression gate — likely overfit. Reverted to previous best on disk.")
             else:
                 iterations_without_improvement += 1
+                recovery_actions.append("not a new best — reverted to previous best checkpoint on disk")
+                self._revert_to_checkpoint()
 
             self.logger.log_iteration(
                 IterationRecord(
@@ -294,4 +529,11 @@ class Orchestrator:
 
 
 if __name__ == "__main__":
-    Orchestrator().run()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--fresh", action="store_true", help="Discard any existing checkpoint and start from iteration 0.")
+    args = parser.parse_args()
+
+    orchestrator = Orchestrator()
+    if args.fresh:
+        orchestrator.checkpoint.clear()
+    orchestrator.run()
