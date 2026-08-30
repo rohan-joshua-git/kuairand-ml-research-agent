@@ -23,7 +23,8 @@ Each iteration:
   8. A new best checkpoint must pass `compression_gate.py` before being
      designated the final candidate.
   9. The loop stops at convergence (no improvement > epsilon for N
-     iterations) or at `agent.max_iterations`, per config.
+     iterations), at `agent.max_iterations`, or at the wall-clock cap —
+     whichever comes first, per config.
 
 This module makes real Anthropic API calls and runs real training — there
 is no mocked/offline mode. See README for how to run it.
@@ -87,8 +88,12 @@ class Orchestrator:
         self.max_iterations = agent_cfg["max_iterations"]
         self.epsilon = self.cfg["starter_kit"]["epsilon"]
         self.patience_n = self.cfg["starter_kit"]["patience_n"]
+        self.wall_clock_cap_hours = self.cfg["starter_kit"]["wall_clock_cap_hours"]
 
         self._start_time = time.time()
+
+    def _elapsed_hours(self) -> float:
+        return (time.time() - self._start_time) / 3600.0
 
     def run(self) -> None:
         split = load_split(self.cfg)
@@ -102,8 +107,13 @@ class Orchestrator:
         iteration = 0
 
         while iteration < self.max_iterations:
+            if self._elapsed_hours() >= self.wall_clock_cap_hours:
+                print(f"\n[orchestrator] Wall-clock cap ({self.wall_clock_cap_hours}h) reached — stopping.")
+                break
+
             iteration += 1
-            print(f"\n[orchestrator] === Iteration {iteration}/{self.max_iterations} ===")
+            print(f"\n[orchestrator] === Iteration {iteration}/{self.max_iterations} "
+                  f"(elapsed {self._elapsed_hours():.2f}h / {self.wall_clock_cap_hours}h) ===")
 
             errors: list[str] = []
             recovery_actions: list[str] = []
@@ -120,11 +130,11 @@ class Orchestrator:
 
             # 3. Reflect: propose a concrete hypothesis.
             reflect_prompt = (
-                f"Current best metrics: NDCG@10={best_metrics.ndcg_at_10:.4f}, "
-                f"Recall@50={best_metrics.recall_at_50:.4f}\n\n"
+                f"Current best metrics: GAUC={best_metrics.gauc:.4f}, "
+                f"nDCG@5={best_metrics.ndcg_at_5:.4f}\n\n"
                 f"Ablation results this round:\n"
                 + "\n".join(
-                    f"  - {r.block_name}: dNDCG={r.delta_ndcg:+.4f} dRecall={r.delta_recall:+.4f}"
+                    f"  - {r.block_name}: dGAUC={r.delta_gauc:+.4f} dNDCG@5={r.delta_ndcg:+.4f}"
                     for r in ablation_results
                 )
                 + f"\n\nHighest-impact block: {target.block_name}\n\n"
@@ -168,7 +178,7 @@ class Orchestrator:
                         timestamp=time.time(),
                         hypothesis=hypothesis,
                         code_diff_summary=f"REJECTED (smoke test failed): {target.block_name}",
-                        metrics={"ndcg_at_10": best_metrics.ndcg_at_10, "recall_at_50": best_metrics.recall_at_50},
+                        metrics={"gauc": best_metrics.gauc, "ndcg_at_5": best_metrics.ndcg_at_5},
                         errors=errors,
                         recovery_actions=recovery_actions,
                     )
@@ -181,7 +191,7 @@ class Orchestrator:
             new_metrics = train_result.val_metrics
 
             delta = score_delta(new_metrics, best_metrics)
-            print(f"[orchestrator] New metrics: NDCG@10={new_metrics.ndcg_at_10:.4f}, Recall@50={new_metrics.recall_at_50:.4f} (delta={delta:+.4f})")
+            print(f"[orchestrator] New metrics: GAUC={new_metrics.gauc:.4f}, nDCG@5={new_metrics.ndcg_at_5:.4f} (delta={delta:+.4f})")
 
             # Play 1: unbiased referee check, if enabled.
             referee_note = ""
@@ -229,8 +239,8 @@ class Orchestrator:
                     hypothesis=hypothesis,
                     code_diff_summary=f"Modified {editable_target}.py targeting {target.block_name}. {referee_note}",
                     metrics={
-                        "ndcg_at_10": new_metrics.ndcg_at_10,
-                        "recall_at_50": new_metrics.recall_at_50,
+                        "gauc": new_metrics.gauc,
+                        "ndcg_at_5": new_metrics.ndcg_at_5,
                         "delta_vs_prev_best": delta,
                         "accepted_as_new_best": is_new_best,
                     },
@@ -243,10 +253,10 @@ class Orchestrator:
                 print(f"\n[orchestrator] Converged: no improvement > epsilon ({self.epsilon}) for {self.patience_n} iterations.")
                 break
 
-        gpu_hours = (time.time() - self._start_time) / 3600.0
-        self.logger.write_resource_usage_report(self.ledger.as_dict(), gpu_hours=gpu_hours)
-        print(f"\n[orchestrator] Run complete. Final best: NDCG@10={best_metrics.ndcg_at_10:.4f}, Recall@50={best_metrics.recall_at_50:.4f}")
-        print(f"[orchestrator] Total tokens: {self.ledger.total_tokens():,} | Wall-clock hours: {gpu_hours:.3f} | Interventions: {self.logger.intervention_count}")
+        wall_clock_hours = self._elapsed_hours()
+        self.logger.write_resource_usage_report(self.ledger.as_dict(), wall_clock_hours=wall_clock_hours)
+        print(f"\n[orchestrator] Run complete. Final best: GAUC={best_metrics.gauc:.4f}, nDCG@5={best_metrics.ndcg_at_5:.4f}")
+        print(f"[orchestrator] Total tokens: {self.ledger.total_tokens():,} | Wall-clock hours: {wall_clock_hours:.3f} | Interventions: {self.logger.intervention_count}")
 
 
 if __name__ == "__main__":

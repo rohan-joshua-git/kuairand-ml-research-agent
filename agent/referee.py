@@ -40,8 +40,8 @@ from pipeline.evaluate import RankingMetrics, compute_ranking_metrics
 class RefereeReport:
     biased_metrics: RankingMetrics
     unbiased_metrics: RankingMetrics
+    divergence_gauc: float
     divergence_ndcg: float
-    divergence_recall: float
     alert: bool
 
 
@@ -79,16 +79,16 @@ def build_referee_report(
     biased = compute_ranking_metrics(biased_val_scored, label_col="label")
     unbiased = score_against_unbiased_probe(unbiased_probe_scored)
 
-    div_ndcg = biased.ndcg_at_10 - unbiased.ndcg_at_10
-    div_recall = biased.recall_at_50 - unbiased.recall_at_50
+    div_gauc = biased.gauc - unbiased.gauc
+    div_ndcg = biased.ndcg_at_5 - unbiased.ndcg_at_5
 
-    alert = div_ndcg > threshold or div_recall > threshold
+    alert = div_gauc > threshold or div_ndcg > threshold
 
     return RefereeReport(
         biased_metrics=biased,
         unbiased_metrics=unbiased,
+        divergence_gauc=div_gauc,
         divergence_ndcg=div_ndcg,
-        divergence_recall=div_recall,
         alert=alert,
     )
 

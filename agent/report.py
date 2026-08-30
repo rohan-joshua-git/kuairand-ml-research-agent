@@ -43,21 +43,21 @@ def generate_results_table(cfg: dict | None = None) -> str:
         "(`pipeline/model/baseline.py`) until the organizer's official "
         "Starter Kit baseline is wired in — see README 'Open Questions'.\n"
     )
-    lines.append("| Iteration | Hypothesis | NDCG@10 | Recall@50 | Delta vs prev best | Accepted | Errors |")
+    lines.append("| Iteration | Hypothesis | GAUC | nDCG@5 | Delta vs prev best | Accepted | Errors |")
     lines.append("|---|---|---|---|---|---|---|")
     for it in iterations:
         m = it.get("metrics", {})
         errors = "; ".join(it.get("errors", [])) or "-"
         lines.append(
             f"| {it['iteration']} | {it['hypothesis'][:80]} | "
-            f"{m.get('ndcg_at_10', float('nan')):.4f} | {m.get('recall_at_50', float('nan')):.4f} | "
+            f"{m.get('gauc', float('nan')):.4f} | {m.get('ndcg_at_5', float('nan')):.4f} | "
             f"{m.get('delta_vs_prev_best', float('nan')):+.4f} | {m.get('accepted_as_new_best', False)} | {errors} |"
         )
 
     lines.append("\n## Resource usage\n")
     if resource:
         lines.append(f"- Total tokens: {resource.get('total_tokens', 'n/a'):,}")
-        lines.append(f"- Wall-clock hours: {resource.get('gpu_hours', 'n/a'):.3f}")
+        lines.append(f"- Wall-clock hours: {resource.get('wall_clock_hours', 'n/a'):.3f}")
         lines.append(f"- Manual interventions: {intervention_count}")
         lines.append("\n### Token usage by model\n")
         for model, usage in resource.get("token_usage_by_model", {}).items():

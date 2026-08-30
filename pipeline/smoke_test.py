@@ -28,8 +28,8 @@ def main() -> None:
 
     result = run_training(split=split, epochs=1)
     metrics = {
-        "ndcg_at_10": result.val_metrics.ndcg_at_10,
-        "recall_at_50": result.val_metrics.recall_at_50,
+        "gauc": result.val_metrics.gauc,
+        "ndcg_at_5": result.val_metrics.ndcg_at_5,
     }
     print(f"SMOKE_TEST_METRICS: {json.dumps(metrics)}")
 

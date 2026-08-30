@@ -12,7 +12,7 @@ import pandas as pd
 from pipeline.data.label import profile_label, resolve_label, valid_play_consistency_check
 from pipeline.data.leakage_guard import drop_leaky_columns, find_leaky_columns
 from pipeline.data.loader import load_split
-from pipeline.evaluate import RankingMetrics, compute_ranking_metrics, score_delta
+from pipeline.evaluate import compute_ranking_metrics, score_delta
 
 TWO_COLUMN_TABS = {0, 1}
 
@@ -53,8 +53,8 @@ def test_leakage_guard():
 
 def test_ranking_metrics():
     # Hand-computable case: 2 users, 4 candidates each.
-    # User A: perfect ranking (all positives ranked first) -> NDCG@10 = 1.0
-    # User B: worst ranking (positive ranked last) -> NDCG@10 < 1.0, known value
+    # User A: perfect ranking (positive ranked first) -> AUC=1.0, nDCG@5=1.0
+    # User B: worst ranking (positive ranked last)     -> AUC=0.0, nDCG@5 < 1.0, known value
     df = pd.DataFrame(
         {
             "user_id": ["A", "A", "A", "A", "B", "B", "B", "B"],
@@ -62,27 +62,34 @@ def test_ranking_metrics():
             "label": [1, 0, 0, 0, 1, 0, 0, 0],        # single relevant item each
         }
     )
-    metrics = compute_ranking_metrics(df, k_ndcg=10, k_recall=50)
-    print(f"[metrics] NDCG@10={metrics.ndcg_at_10:.4f} Recall@50={metrics.recall_at_50:.4f}")
+    metrics = compute_ranking_metrics(df, k_ndcg=5)
+    print(f"[metrics] GAUC={metrics.gauc:.4f} nDCG@5={metrics.ndcg_at_5:.4f}")
 
     # User A: relevant item has the highest score -> ranked 1st -> DCG=IDCG -> NDCG=1.0
     # User B: relevant item has the LOWEST score -> ranked 4th (last) -> DCG = 1/log2(5), IDCG = 1/log2(2)
     expected_ndcg_b = (1 / np.log2(5)) / (1 / np.log2(2))
     expected_mean_ndcg = (1.0 + expected_ndcg_b) / 2
-    assert abs(metrics.ndcg_at_10 - expected_mean_ndcg) < 1e-9, f"expected {expected_mean_ndcg}, got {metrics.ndcg_at_10}"
+    assert abs(metrics.ndcg_at_5 - expected_mean_ndcg) < 1e-9, f"expected {expected_mean_ndcg}, got {metrics.ndcg_at_5}"
 
-    # Both users have exactly 1 relevant item, both within top 50 -> Recall@50 = 1.0 for both
-    assert abs(metrics.recall_at_50 - 1.0) < 1e-9
+    # A: positive ranked above all 3 negatives -> AUC=1.0. B: positive ranked below all 3 -> AUC=0.0.
+    # GAUC is impression-weighted (4 candidates each here, so a plain mean) -> (1.0 + 0.0) / 2 = 0.5
+    assert abs(metrics.gauc - 0.5) < 1e-9, f"expected GAUC 0.5, got {metrics.gauc}"
+    assert metrics.n_users_gauc == 2
 
     # Sanity-check score_delta: identical metrics -> 0 delta
     delta = score_delta(metrics, metrics)
     assert abs(delta) < 1e-9
 
-    # A user with zero positives should be excluded from recall (not counted as 0)
+    # A user with zero positives (single-class labels): included in nDCG@5 as 0.0 (per the
+    # challenge brief — a no-positive-label user has nDCG 0 for any model), but excluded from
+    # GAUC entirely (AUC is undefined without both classes).
     df_no_pos = pd.DataFrame({"user_id": ["C", "C"], "score": [1, 2], "label": [0, 0]})
     df2 = pd.concat([df, df_no_pos], ignore_index=True)
-    metrics2 = compute_ranking_metrics(df2, k_ndcg=10, k_recall=50)
-    assert abs(metrics2.recall_at_50 - metrics.recall_at_50) < 1e-9, "user with no positives should not change mean recall"
+    metrics2 = compute_ranking_metrics(df2, k_ndcg=5)
+    expected_mean_ndcg_with_c = (1.0 + expected_ndcg_b + 0.0) / 3
+    assert abs(metrics2.ndcg_at_5 - expected_mean_ndcg_with_c) < 1e-9, "user with no positives should count as 0 in nDCG@5 mean"
+    assert abs(metrics2.gauc - metrics.gauc) < 1e-9, "user with no positives should not change GAUC"
+    assert metrics2.n_users_gauc == 2, "user with no positives should not be counted toward GAUC"
     print("[metrics] PASS")
 
 

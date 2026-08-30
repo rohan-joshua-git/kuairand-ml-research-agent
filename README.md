@@ -1,6 +1,6 @@
 # Autonomous ML Research Agent - KuaiRand-Pure
 
-An LLM agent that runs the ML engineering loop (read the problem, inspect data, engineer features, train, tune, evaluate, reflect, revise) on the KuaiRand-Pure recommendation dataset, aiming to beat a baseline on NDCG@10 and Recall@50 without a human in the iteration loop.
+An LLM agent that runs the ML engineering loop (read the problem, inspect data, engineer features, train, tune, evaluate, reflect, revise) on the KuaiRand-Pure recommendation dataset, aiming to beat a baseline on GAUC and nDCG@5 without a human in the iteration loop.
 
 Status tags used below: **Implemented** (exists in this repo, verifiable by the file cited next to it), **Placeholder** (a working stand-in, not the final version), **Planned** (designed or partially built, not yet wired into the live loop).
 
@@ -64,7 +64,7 @@ pipeline/                 the RecSys ML pipeline; what the agent edits
     baseline.py               placeholder reference model (small embedding+MLP CTR net)
     architectures/             where agent-proposed model variants would land
   train.py                     training entrypoint (used by orchestrator + smoke tests)
-  evaluate.py                  NDCG@10 / Recall@50, computed per-user
+  evaluate.py                  GAUC / nDCG@5, computed per-user
   smoke_test.py                fast sanity check before a patch is trusted
   submit.py                    final submission writer, raises until schema is known
 
@@ -117,8 +117,8 @@ Facts only the challenge organizers can supply. The codebase isolates each one b
 
 1. Is `log_random_4_22_to_5_08_pure.csv` permitted for training (`referee.mode: tier_a`), for propensity estimation/diagnostics only (`tier_b`, current default), or not at all (`disabled`)?
 2. Are the Zenodo supplementary files (video captions, category taxonomy) in scope? Gated in `pipeline/data/download.py`.
-3. What is the candidate set at scoring time: each user's impressed set, or the full ~7,583-item catalog? Changes what NDCG@10/Recall@50 mean; `pipeline/evaluate.py` currently ranks over whatever's in the input DataFrame (defaults to impressed-set, computable without organizer input).
-4. What are epsilon and N (convergence rule) and the compute budget? Placeholders live in `config.starter_kit`.
+3. What is the candidate set at scoring time: each user's impressed set, or the full ~7,583-item catalog? Changes what GAUC/nDCG@5 mean; `pipeline/evaluate.py` currently ranks over whatever's in the input DataFrame (defaults to impressed-set, computable without organizer input).
+4. The compute budget beyond wall-clock (e.g. a token budget). Epsilon (0.002), N (3), the 50-iteration cap, and the 6h wall-clock ceiling are fixed by the challenge brief and set in `config.starter_kit`; what's still unconfirmed is any additional token/cost budget.
 5. The actual organizer baseline, eval script, and submission schema. Until these land, `pipeline/model/baseline.py` is a stand-in and `pipeline/submit.py` raises rather than guessing a format.
 
 ## Limitations

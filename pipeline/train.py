@@ -149,5 +149,5 @@ def _evaluate_on_split(model: nn.Module, feat_df: pd.DataFrame, id_maps: dict, l
 if __name__ == "__main__":
     result = run_training()
     print(f"epoch losses: {result.epoch_losses}")
-    print(f"val NDCG@10:   {result.val_metrics.ndcg_at_10:.4f}")
-    print(f"val Recall@50: {result.val_metrics.recall_at_50:.4f}")
+    print(f"val GAUC:     {result.val_metrics.gauc:.4f}")
+    print(f"val nDCG@5:   {result.val_metrics.ndcg_at_5:.4f}")

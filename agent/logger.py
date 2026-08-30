@@ -60,11 +60,11 @@ class RunLogger:
     def intervention_count(self) -> int:
         return self._intervention_count
 
-    def write_resource_usage_report(self, token_usage_by_model: dict, gpu_hours: float) -> None:
+    def write_resource_usage_report(self, token_usage_by_model: dict, wall_clock_hours: float) -> None:
         report = {
             "token_usage_by_model": token_usage_by_model,
             "total_tokens": sum(v["input_tokens"] + v["output_tokens"] for v in token_usage_by_model.values()),
-            "gpu_hours": gpu_hours,
+            "wall_clock_hours": wall_clock_hours,
             "intervention_count": self._intervention_count,
             "generated_at": time.time(),
         }

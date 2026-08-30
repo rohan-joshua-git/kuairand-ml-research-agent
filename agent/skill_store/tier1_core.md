@@ -8,12 +8,14 @@ by `retriever.py` only when the current ablation target calls for it.
 
 ## Task framing
 
-- Dataset: KuaiRand-Pure. Positive label: `is_click`. Metrics: NDCG@10,
-  Recall@50. Scored as `mean(NDCG_delta, Recall_delta)` vs. the organizer
-  baseline — **absolute** delta, not relative. Recall@50 is numerically
-  much larger than NDCG@10, so it dominates the mean. Prioritize changes
-  that move Recall@50 (coverage, candidate ranking breadth) over changes
-  that only polish top-10 ordering.
+- Dataset: KuaiRand-Pure. Positive label: `is_click`. Metrics: GAUC,
+  nDCG@5. Scored as `mean(GAUC_delta, nDCG@5_delta)` vs. the organizer
+  baseline — **absolute** delta, not relative, on the hidden test set.
+  Both metrics sit in a comparable range (perfect ranking: GAUC 1.0000,
+  nDCG@5 0.7289; random: ~0.4753 combined) so neither dominates the mean —
+  treat ranking quality (GAUC: does the model separate a user's clicked
+  items from their non-clicked ones) and top-of-list precision (nDCG@5)
+  as equally worth optimizing.
 - Split is date-pinned: train = 4/08-4/21, val = first half of 4/22-5/08,
   test = second half (hidden — never load it, see `pipeline/data/loader.py`
   `allow_test` guard).

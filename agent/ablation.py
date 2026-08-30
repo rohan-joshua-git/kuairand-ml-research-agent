@@ -37,8 +37,8 @@ class AblationResult:
     block_name: str
     description: str
     val_metrics: RankingMetrics
+    delta_gauc: float
     delta_ndcg: float
-    delta_recall: float
 
 
 def default_block_variants() -> list[BlockVariant]:
@@ -74,16 +74,16 @@ def run_ablation(
                 block_name=variant.block_name,
                 description=variant.description,
                 val_metrics=m,
-                delta_ndcg=m.ndcg_at_10 - baseline_metrics.ndcg_at_10,
-                delta_recall=m.recall_at_50 - baseline_metrics.recall_at_50,
+                delta_gauc=m.gauc - baseline_metrics.gauc,
+                delta_ndcg=m.ndcg_at_5 - baseline_metrics.ndcg_at_5,
             )
         )
     return results
 
 
 def pick_highest_impact_block(results: list[AblationResult]) -> AblationResult:
-    """Per README/Tier-1 guidance: Recall@50 dominates the challenge's
-    absolute-delta scoring since it's numerically larger than NDCG@10, so
-    rank primarily on recall delta, using NDCG delta as a tiebreaker.
+    """Per README/Tier-1 guidance: the challenge scores an equal-weighted
+    mean of GAUC delta and nDCG@5 delta, so rank on the combined (mean)
+    delta rather than favoring either metric.
     """
-    return max(results, key=lambda r: (r.delta_recall, r.delta_ndcg))
+    return max(results, key=lambda r: (r.delta_gauc + r.delta_ndcg) / 2.0)
