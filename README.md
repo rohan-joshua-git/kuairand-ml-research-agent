@@ -2,6 +2,8 @@
 
 An LLM agent that runs the ML engineering loop (read the problem, inspect data, engineer features, train, tune, evaluate, reflect, revise) on the KuaiRand-Pure recommendation dataset, aiming to beat a baseline on NDCG@10 and Recall@50 without a human in the iteration loop.
 
+Status tags used below: **Implemented** (exists in this repo, verifiable by the file cited next to it), **Placeholder** (a working stand-in, not the final version), **Planned** (designed or partially built, not yet wired into the live loop).
+
 ## Overview
 
 Recommendation models like the one behind a short-video feed are built by repeatedly testing changes against held-out data. A common failure mode when automating this loop: the training data itself is biased, since it only contains items a prior recommender already chose to show users. An agent optimizing against that data can learn to exploit the bias instead of genuinely improving, and then underperform on unseen data.
@@ -16,10 +18,12 @@ Three things in this build address that:
 
 This is a working, runnable scaffold, not a finished benchmarked agent.
 
-- The loop runs end-to-end against a placeholder baseline model, not the official organizer baseline, since the organizer's Starter Kit (baseline, eval script, candidate-set definition, budget rules) isn't available yet. See [Open questions](#open-questions).
-- The agent writes and applies its own code each iteration via the Anthropic API, scoped to feature engineering and label logic, with automatic rollback on a failed smoke test. It doesn't yet rewrite model architecture or the training loop. See [Limitations](#limitations).
-- The unbiased referee (scoring, propensity estimation, divergence tracking) is implemented and tested in isolation but not yet wired into the live per-iteration loop.
-- `pipeline/submit.py` raises rather than guessing a submission schema, until the organizer's format is known.
+| Piece | Status | Note |
+|---|---|---|
+| End-to-end loop | Implemented | Runs against a placeholder baseline model, not the official organizer one; Starter Kit isn't available yet. See [Open questions](#open-questions). |
+| Self-editing code | Implemented | Real API calls, scoped to `pipeline/data/features.py` and `pipeline/data/label.py`, with automatic rollback on a failed smoke test. See [Limitations](#limitations). |
+| Unbiased referee | Planned | Scoring, propensity estimation, and divergence tracking are implemented and tested in isolation, not yet wired into the live per-iteration loop. |
+| Submission writer | Implemented (guarded) | `pipeline/submit.py` raises rather than guessing a schema, until the organizer's format is known. |
 
 ## Architecture
 
@@ -99,17 +103,11 @@ python -m pipeline.data.download --check   # tells you what to place where
 
 ## Reproduction steps
 
-```bash
-# 1. Sanity-check the pipeline runs against the placeholder baseline:
-python -m pipeline.train
-
-# 2. Run the full autonomous agent loop:
-python -m agent.orchestrator
-
-# 3. Generate the results table + resource usage summary from the run log:
-python -m agent.report
-# writes docs/results_table.md
-```
+| Command | Purpose |
+|---|---|
+| `python -m pipeline.train` | Sanity-check the pipeline runs against the placeholder baseline |
+| `python -m agent.orchestrator` | Run the full autonomous agent loop |
+| `python -m agent.report` | Generate `docs/results_table.md` and a resource-usage summary from the run log |
 
 `config/agent_config.yaml` controls which Claude models run which role, iteration budget, convergence thresholds, and the referee mode toggle. Every value that depends on the organizer's Starter Kit is called out there explicitly.
 
@@ -129,3 +127,7 @@ Facts only the challenge organizers can supply. The codebase isolates each one b
 - **Referee's live per-iteration wiring is partial.** The scoring logic and divergence math (`agent/referee.py`) are implemented and tested in isolation, but `orchestrator.py` doesn't yet run inference over the random-exposure log every iteration; the integration point is marked explicitly in the code (`referee_note` in `orchestrator.py`).
 - **No GPU-hour tracking beyond wall-clock.** `logger.py` reports wall-clock time as a proxy; real GPU-hour accounting (e.g. via `nvidia-smi` polling) isn't wired in.
 - **Baseline is a placeholder.** Every "beats baseline" claim from this codebase today is against a small reference model, not the organizer's official one.
+
+---
+
+In one line: an ablation-guided agent that edits its own feature and label code against KuaiRand-Pure, checked against an unbiased random-exposure log and a fresh-context reproduction gate before any result counts as real.
