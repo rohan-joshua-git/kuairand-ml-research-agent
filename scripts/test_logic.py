@@ -1,0 +1,93 @@
+"""
+NOT part of the agent pipeline. Ad-hoc verification script — checks the
+non-ML logic (label resolution, leakage guard, ranking metrics) against
+hand-computable examples and the synthetic data, so these can be trusted
+before spending real API calls / GPU time on the full loop.
+"""
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+from pipeline.data.label import profile_label, resolve_label, valid_play_consistency_check
+from pipeline.data.leakage_guard import drop_leaky_columns, find_leaky_columns
+from pipeline.data.loader import load_split
+from pipeline.evaluate import RankingMetrics, compute_ranking_metrics, score_delta
+
+TWO_COLUMN_TABS = {0, 1}
+
+
+def test_label_logic():
+    split = load_split()
+    profile = profile_label(split.train, TWO_COLUMN_TABS)
+    print(f"[label] rows={profile.n_rows} two_col={profile.n_two_column} single_col={profile.n_single_column}")
+    print(f"[label] click_rate two_col={profile.click_rate_two_column:.3f} single_col={profile.click_rate_single_column:.3f}")
+
+    consistency = valid_play_consistency_check(split.train, TWO_COLUMN_TABS)
+    print(f"[label] valid_play consistency on single-col rows: {consistency:.3f} (should be ~1.0 by construction in synthetic data)")
+    assert consistency > 0.99, "valid_play derivation doesn't match is_click on synthetic single-column rows"
+
+    raw = resolve_label(split.train, TWO_COLUMN_TABS, mode="raw")
+    click_only = resolve_label(split.train, TWO_COLUMN_TABS, mode="click_only")
+    assert (click_only <= raw).all(), "click_only mode should never exceed raw"
+    is_two_col = split.train["tab"].isin(TWO_COLUMN_TABS)
+    assert (click_only[~is_two_col] == 0).all(), "click_only should zero out all single-column-UI rows"
+    print("[label] PASS")
+
+
+def test_leakage_guard():
+    split = load_split()
+    leaky = find_leaky_columns(split.train)
+    print(f"[leakage] detected leaky columns: {leaky}")
+    assert "video_features_statistic_play_count" in leaky
+
+    clean, dropped = drop_leaky_columns(split.train)
+    assert "video_features_statistic_play_count" not in clean.columns
+    assert dropped == leaky
+
+    clean_allowed, dropped_allowed = drop_leaky_columns(split.train, allow_columns=leaky)
+    assert dropped_allowed == []
+    assert "video_features_statistic_play_count" in clean_allowed.columns
+    print("[leakage] PASS")
+
+
+def test_ranking_metrics():
+    # Hand-computable case: 2 users, 4 candidates each.
+    # User A: perfect ranking (all positives ranked first) -> NDCG@10 = 1.0
+    # User B: worst ranking (positive ranked last) -> NDCG@10 < 1.0, known value
+    df = pd.DataFrame(
+        {
+            "user_id": ["A", "A", "A", "A", "B", "B", "B", "B"],
+            "score": [4, 3, 2, 1, 1, 2, 3, 4],       # A: descending matches order given; B: ascending
+            "label": [1, 0, 0, 0, 1, 0, 0, 0],        # single relevant item each
+        }
+    )
+    metrics = compute_ranking_metrics(df, k_ndcg=10, k_recall=50)
+    print(f"[metrics] NDCG@10={metrics.ndcg_at_10:.4f} Recall@50={metrics.recall_at_50:.4f}")
+
+    # User A: relevant item has the highest score -> ranked 1st -> DCG=IDCG -> NDCG=1.0
+    # User B: relevant item has the LOWEST score -> ranked 4th (last) -> DCG = 1/log2(5), IDCG = 1/log2(2)
+    expected_ndcg_b = (1 / np.log2(5)) / (1 / np.log2(2))
+    expected_mean_ndcg = (1.0 + expected_ndcg_b) / 2
+    assert abs(metrics.ndcg_at_10 - expected_mean_ndcg) < 1e-9, f"expected {expected_mean_ndcg}, got {metrics.ndcg_at_10}"
+
+    # Both users have exactly 1 relevant item, both within top 50 -> Recall@50 = 1.0 for both
+    assert abs(metrics.recall_at_50 - 1.0) < 1e-9
+
+    # Sanity-check score_delta: identical metrics -> 0 delta
+    delta = score_delta(metrics, metrics)
+    assert abs(delta) < 1e-9
+
+    # A user with zero positives should be excluded from recall (not counted as 0)
+    df_no_pos = pd.DataFrame({"user_id": ["C", "C"], "score": [1, 2], "label": [0, 0]})
+    df2 = pd.concat([df, df_no_pos], ignore_index=True)
+    metrics2 = compute_ranking_metrics(df2, k_ndcg=10, k_recall=50)
+    assert abs(metrics2.recall_at_50 - metrics.recall_at_50) < 1e-9, "user with no positives should not change mean recall"
+    print("[metrics] PASS")
+
+
+if __name__ == "__main__":
+    test_label_logic()
+    test_leakage_guard()
+    test_ranking_metrics()
+    print("\nALL LOGIC TESTS PASSED")
