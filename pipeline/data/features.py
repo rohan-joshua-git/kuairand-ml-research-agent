@@ -28,6 +28,20 @@ NUMERIC_SIGNAL_COLUMNS = [
     "duration_ms",
 ]
 
+# Categorical columns this module ADDS that the model should encode.
+#
+# READ THIS BEFORE ADDING A FEATURE: pipeline/train.py encodes the official
+# baseline's five fields plus whatever is registered here. A new categorical
+# column that is not registered here is computed and then silently ignored by
+# the encoder — it will produce a bit-identical score and waste the iteration.
+# (This happened twice in the run of 2026-08-31: two different patches adding a
+# video-quality prior both scored exactly 0.6024, because the column was never
+# encoded.) So: add the column to build_features AND append its name here, in
+# the same edit.
+EXTRA_CATEGORICAL_FIELDS = [
+    "pos_bucket",
+]
+
 AUXILIARY_LABEL_COLUMNS = [
     "is_click",
     "is_like",

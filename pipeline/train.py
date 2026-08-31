@@ -41,15 +41,30 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
-from pipeline.data.features import build_features
+from pipeline.data.features import EXTRA_CATEGORICAL_FIELDS, build_features
 from pipeline.data.label import resolve_label
 from pipeline.data.loader import KuaiRandSplit, load_config, load_split
 from pipeline.evaluate import RankingMetrics, compute_ranking_metrics
 
 # Mirrors starter_kit/data.py FIELDS — the official baseline's field list.
-# The official baseline's five fields, plus pos_bucket (session position),
-# which is built in pipeline/data/features.py and measured there.
-CATEGORICAL_FIELDS = ["user_id", "video_id", "author_id", "tab", "dur_bucket", "pos_bucket"]
+# The official baseline's five fields (starter_kit/data.py FIELDS).
+OFFICIAL_FIELDS = ["user_id", "video_id", "author_id", "tab", "dur_bucket"]
+
+
+def resolve_fields(frame: pd.DataFrame) -> list[str]:
+    """Official fields plus any extra categorical column that features.py
+    registered in EXTRA_CATEGORICAL_FIELDS and actually produced.
+
+    Resolved once per training run and stored in id_maps, so scoring always
+    encodes the same fields the model was fitted on even if the registry
+    changes underneath a saved model."""
+    extras = [f for f in EXTRA_CATEGORICAL_FIELDS
+              if f not in OFFICIAL_FIELDS and (f in frame.columns or f == "dur_bucket")]
+    return OFFICIAL_FIELDS + extras
+
+
+# Back-compat alias; the authoritative list per-run lives in id_maps["fields"].
+CATEGORICAL_FIELDS = OFFICIAL_FIELDS + [f for f in EXTRA_CATEGORICAL_FIELDS if f not in OFFICIAL_FIELDS]
 N_DUR_BUCKETS = 10
 
 
@@ -97,17 +112,19 @@ def _build_id_maps(train_df: pd.DataFrame) -> dict:
     frame = train_df.copy()
     frame["dur_bucket"] = _dur_bucket(frame["duration_ms"], edges)
 
+    fields = resolve_fields(frame)
     vocabs, dims = {}, []
-    for fieldname in CATEGORICAL_FIELDS:
+    for fieldname in fields:
         values = frame[fieldname].astype(str).unique() if fieldname in frame.columns else np.array([], dtype=str)
         vocabs[fieldname] = {v: i for i, v in enumerate(values)}
         dims.append(len(values) + 1)  # +1 UNK
 
     offsets = np.cumsum([0] + dims[:-1]).astype(np.int64)
     return {
+        "fields": fields,
         "vocabs": vocabs,
-        "unk": {f: len(vocabs[f]) for f in CATEGORICAL_FIELDS},
-        "offsets": {f: int(o) for f, o in zip(CATEGORICAL_FIELDS, offsets)},
+        "unk": {f: len(vocabs[f]) for f in fields},
+        "offsets": {f: int(o) for f, o in zip(fields, offsets)},
         "total_dim": int(sum(dims)),
         "dur_edges": edges,
     }
@@ -120,7 +137,7 @@ def _encode(df: pd.DataFrame, id_maps: dict) -> np.ndarray:
     frame["dur_bucket"] = _dur_bucket(frame["duration_ms"], id_maps["dur_edges"])
 
     columns = []
-    for fieldname in CATEGORICAL_FIELDS:
+    for fieldname in id_maps.get("fields", CATEGORICAL_FIELDS):
         vocab = id_maps["vocabs"][fieldname]
         unk = id_maps["unk"][fieldname]
         offset = id_maps["offsets"][fieldname]
