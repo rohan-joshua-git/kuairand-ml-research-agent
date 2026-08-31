@@ -27,5 +27,36 @@
     "submissions/previous_5seed/submission_test.csv": "ebc9432a29ea67786aaddc72720345501fa60e0e8ea9c3b46e1dc92af45ffd40",
     "submissions/previous_5seed/submission_valid.csv": "67902fdc7ffb0a40246c8e5a0afd2354bed079db59c4f0ecced5a958e1606429"
   },
-  "note": "Submission CSVs are gitignored and regenerable. Hashes recorded here so the exact artifact can be verified. Final config: DeepFM-lite, 10-seed rank-average, seeds 0-9, validation primary 0.6053 (GAUC 0.6724 / nDCG@5 0.5382), scored by starter_kit/evaluate.py via submit.py --score on the valid split only."
+  "note": "Submission CSVs are gitignored and regenerable. Hashes recorded here so the exact artifact can be verified. Final config: DeepFM-lite, 10-seed rank-average, seeds 0-9, validation primary 0.6053 (GAUC 0.6724 / nDCG@5 0.5382), scored by starter_kit/evaluate.py via submit.py --score on the valid split only.",
+  "validation_metrics": {
+    "source": "starter_kit/submit.py --score on submissions/submission_valid.csv (split=valid)",
+    "GAUC": 0.6724,
+    "nDCG_at_5": 0.5382,
+    "primary": 0.6053
+  },
+  "baseline_reproduction": {
+    "source": "python -m pipeline.official_baseline (validation only; test never evaluated)",
+    "GAUC": 0.6671,
+    "nDCG_at_5": 0.5358,
+    "primary": 0.6015,
+    "published_valid_primary": 0.6016
+  },
+  "single_seed_distribution": {
+    "n_seeds": 20,
+    "mean": 0.60448,
+    "std": 0.00049,
+    "min": 0.6036,
+    "max": 0.6052,
+    "note": "The champion was previously quoted at 0.6047 with a 3-seed std of 0.0001. Seeds 0-2 were an unusually tight triple; over 20 seeds the std is 0.00049."
+  },
+  "protocol": {
+    "selection_users": 11270,
+    "confirmation_users": 11107,
+    "selection_primary": 0.6083,
+    "confirmation_primary": 0.6023,
+    "advantage_over_frozen_prior_selection": 0.025,
+    "advantage_over_frozen_prior_confirmation": 0.0242,
+    "confirmation_looks_spent": 1
+  },
+  "hidden_test": "NOT CLAIMED. The hidden test is scored once by the organizer. No test score is asserted anywhere in this repository. The official baseline's published test primary is 0.5946, quoted only as the organizer's own reference figure and never compared against a validation number."
 }
