@@ -40,7 +40,9 @@ NUMERIC_SIGNAL_COLUMNS = [
 # the same edit.
 EXTRA_CATEGORICAL_FIELDS = [
     "pos_bucket",
-]
+    "tag1",
+    "upload_type",
+]  # + USER_FEATURE_FIELDS appended below once they are defined
 
 AUXILIARY_LABEL_COLUMNS = [
     "is_click",
@@ -57,14 +59,75 @@ def load_video_basic_features() -> pd.DataFrame | None:
     """`video_features_basic_pure.csv` (video_id -> author_id): static
     attributes fixed at upload time, so not leaky — unlike the statistic file
     (see leakage_guard.py). author_id is the one item-side field the official
-    baseline uses. Cached: it is read once per process, not once per call."""
+    baseline uses; `tag` and `upload_type` are added because they are the only
+    columns in this file that pool videos into GROUPS. Measured on validation
+    (target-encoded on train, standalone within-user GAUC): author_id 0.6367 and
+    music_id 0.6365 look strong but correlate 0.985 / 0.987 with the video_id
+    encoding — 87% of authors and 98% of music_ids own exactly ONE video, so
+    both are the video identity in disguise and add nothing over the video_id
+    embedding the model already has. tag correlates only 0.458 with it at GAUC
+    0.5604, and upload_type 0.5214. Those two are the real pooling levels.
+    video_type (0.5014), music_type (0.5065) and visible_status (constant) are
+    left out as measured-dead. Cached: read once per process, not once per call."""
     from pipeline.data.loader import load_config
 
     cfg = load_config()
     path = Path(cfg["dataset"]["raw_dir"]) / cfg["dataset"]["features"]["video_basic"]
     if not path.exists():
         return None
-    return pd.read_csv(path, usecols=["video_id", "author_id"])
+    return pd.read_csv(path, usecols=["video_id", "author_id", "tag", "upload_type"])
+
+
+# User-side metadata (`user_features_pure.csv`, 27,285 users). Every one of
+# these is CONSTANT within a user, so none of them can move a within-user
+# ranking on its own — `user_id` target-encoded scores exactly 0.5000. They earn
+# their place only through INTERACTIONS: the FM's second-order term gives
+# <e_user_attr, e_video> and <e_user_attr, e_tab> for free, which lets the model
+# learn "users of this type are selective in this tab" as a prior SHARED across
+# users. That is the thing a raw `user_id` embedding cannot do for a user with
+# few training rows. The same property makes them leakage-free for this metric:
+# a within-user-constant column cannot encode within-user order.
+#
+# Excluded on measurement: `is_lowactive_period` has ONE distinct value, and the
+# raw counts (`follow_user_num`, `fans_user_num`, `friend_user_num`,
+# `register_days`) are dropped in favour of the dataset's own `*_range` buckets,
+# which are the same information at a cardinality an embedding can actually fit.
+USER_CORE_FIELDS = [
+    "user_active_degree", "is_live_streamer", "is_video_author",
+    "follow_user_num_range", "fans_user_num_range", "friend_user_num_range",
+    "register_days_range",
+]
+# Anonymised user attributes. feat3 (1,471 values), feat8 (454) and feat7 (118)
+# are held out of the default set as high-cardinality-per-user risks.
+USER_ONEHOT_FIELDS = [f"onehot_feat{i}" for i in (0, 1, 2, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17)]
+USER_FEATURE_FIELDS = USER_CORE_FIELDS + USER_ONEHOT_FIELDS
+
+# MEASURED NEUTRAL — not registered by default. Encoding these cost -0.0002
+# with the 7 core fields and gained +0.0001 with all 22 (3 seeds each, control
+# 0.6047 std 0.0001), while the 7-field arm TRIPLED seed variance. A conditional
+# probe agrees and is well powered: holding the video-quality prior fixed in 20
+# quantile buckets, every user field moved within-user GAUC by -0.0004..+0.0001
+# (user_active_degree alone gives 9 x 20 = 180 cells over 1.1M rows, so this is
+# a real null, not sparsity). The join above still runs so the columns exist;
+# to test them again, append USER_FEATURE_FIELDS to
+# pipeline.train.EXTRA_CATEGORICAL_FIELDS (train.py's binding — see the
+# from-import trap in the skill store).
+# EXTRA_CATEGORICAL_FIELDS.extend(USER_FEATURE_FIELDS)
+
+
+@lru_cache(maxsize=1)
+def load_user_features() -> pd.DataFrame | None:
+    """Static per-user attributes. Cached: read once per process."""
+    from pipeline.data.loader import load_config
+
+    cfg = load_config()
+    path = Path(cfg["dataset"]["raw_dir"]) / cfg["dataset"]["features"]["user_features"]
+    if not path.exists():
+        return None
+    frame = pd.read_csv(path, usecols=["user_id"] + USER_FEATURE_FIELDS)
+    for col in USER_FEATURE_FIELDS:
+        frame[col] = frame[col].astype(str)
+    return frame
 
 
 def build_features(
@@ -104,6 +167,14 @@ def build_features(
     if video_features_basic is not None and not video_features_basic.empty:
         out = out.merge(video_features_basic, on="video_id", how="left")
 
+    # Always merged so the columns EXIST for every caller; which of them are
+    # actually encoded is controlled by EXTRA_CATEGORICAL_FIELDS below, so an
+    # A/B test toggles the registry rather than the join.
+    if any(f in EXTRA_CATEGORICAL_FIELDS for f in USER_FEATURE_FIELDS):
+        user_features = load_user_features()
+        if user_features is not None and not user_features.empty:
+            out = out.merge(user_features, on="user_id", how="left")
+
     if video_features_statistic is not None:
         vf_clean, dropped = drop_leaky_columns(video_features_statistic, allow_columns=allow_leaky_columns)
         out = out.merge(vf_clean, on="video_id", how="left")
@@ -130,6 +201,18 @@ def build_features(
         out["pos_bucket"] = pos.reindex(out.index)
     elif "pos_bucket" not in out.columns:
         out["pos_bucket"] = 0
+
+    # Primary content tag. KuaiRand's `tag` is multi-valued ("39,68"), and the
+    # model encodes single categorical values, so the FIRST tag is used as the
+    # video's primary topic. Videos have a median of 10 per tag across 110 tags,
+    # which is a real pooling level — unlike author/music, which are ~1 video
+    # each (see load_video_basic_features). Missing tags become their own
+    # "NONE" category rather than being dropped: 96 videos have no tag, and
+    # "untagged" is itself a signal the embedding can learn.
+    if "tag" in out.columns:
+        out["tag1"] = out["tag"].astype(str).str.split(",").str[0].replace("nan", "NONE")
+    elif "tag1" not in out.columns:
+        out["tag1"] = "NONE"
 
     for col in NUMERIC_SIGNAL_COLUMNS:
         if col in out.columns:

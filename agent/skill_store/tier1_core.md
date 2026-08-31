@@ -225,6 +225,181 @@ This also explains why the referee's absolute divergence is always large
 (~0.19-0.24): the two splits have structurally different label distributions,
 so only the CHANGE in divergence across iterations is informative.
 
+## Measured 2026-08-31 (second pass — dataset STRUCTURE, treat as settled)
+
+**Check the granularity of a field before believing its aggregate score.**
+`video_features_basic_pure.csv` has 7,583 videos and:
+
+| field | distinct | videos per entity |
+|---|---|---|
+| author_id | 6,510 | 87% own exactly ONE video |
+| music_id | 7,202 | 98% own exactly ONE video |
+| tag | 110 (multi-valued) | median 10 — a REAL pooling level |
+| upload_type | 14 | real, weak |
+| video_type / music_type / visible_status | 3 / 5 / 1 | dead |
+
+This CORRECTS the entry above. Author and music aggregate quality really do
+score ~0.64, but they are the **video identity in disguise**: target-encoded on
+train and scored on val, `corr(video_te, author_te) = 0.985` and
+`corr(video_te, music_te) = 0.987`. They add nothing over the `video_id`
+embedding the model already has. Only `tag1` is independent —
+`corr(video_te, tag1_te) = 0.458` at GAUC 0.5604. Adding `tag1` + `upload_type`
+as encoded fields moved valid primary 0.6045 -> 0.6048, i.e. **neutral**
+(seed std is 0.0004). Kept, but it is not a win.
+
+**`upload_dt` has THREE distinct values** (2022-04-09/10/11): every video in
+KuaiRand-Pure was uploaded inside a 3-day window. There is no video lifecycle
+here, so the whole temporal-dynamics family has no substrate — freshness/decay
+curves, momentum, rolling/EWMA statistics, HAR, GARCH, Hawkes/self-exciting
+intensity, Kalman/state-space, change-point detection, ARIMA-family forecasting.
+Do not spend iterations on any of them. The earlier "video freshness 0.5120"
+entry is really a 3-level categorical, not an age.
+
+**`tab` is the master context variable.** Its long_view base rate runs from
+0.004 (tab 3) to 0.489 (tab 4) across 15 tabs, and every item feature gains
+sharply when crossed with it (smoothed target encoding, fit on train, scored on
+val): video_id 0.6387 -> 0.6479, tag1 0.5604 -> 0.6153, upload_type 0.5214 ->
+0.5938. `video_id x user_id` is 0.4973 — noise, re-confirming no personalisation.
+
+**But a cross's standalone GAUC overstates its INCREMENTAL value.** Feeding
+`video x tab` to the model as a 5-fold out-of-fold smoothed target encoding,
+quantile-bucketed into 32 bins, scored **0.6047 vs 0.6045 — flat**. The FM's
+second-order term already approximates `<e_video, e_tab>`. General lesson:
+before building a cross feature, check whether the model already contains both
+parent fields; if it does, the standalone number is not the expected gain.
+(The machinery is in `pipeline/train.py` — `CROSS_TE_SPECS`, `_fit_cross_te` —
+and is correct and reusable; it is the hypothesis that failed, not the code.)
+
+**Oracle ceilings, priors fit ON VALIDATION (diagnosis only, never submitted):**
+
+| oracle | primary |
+|---|---|
+| video quality | 0.6146 |
+| video x tab | 0.6351 |
+| video x tab x date | 0.6913 |
+| user x video (memorises the label) | 0.8477 |
+| **our trained model** | **0.6047** |
+
+We are at **98% of the pure item-quality ceiling**. That is the single most
+important number for planning: gains from better item-quality estimation are
+capped at roughly +0.010, and the split's remaining headroom lives in
+user x video, which we have measured three times as noise (0.4970 / 0.4973 /
+0.4981). Treat large remaining gaps to the 0.8645 oracle as unreachable.
+
+**`user_id` is NOT a pure overfitting engine — hypothesis tested and killed.**
+Reasoning from our own numbers (user x video affinity 0.4970, user x author
+0.4981, user x video cross 0.4973 — all noise), the 22k x 16 user embedding
+looked like 350k parameters fitting nothing, and its LINEAR term provably
+cannot change a within-user ranking. Deleting the field costs **-0.0091**
+(0.5955 vs 0.6046, 3 seeds each, std 0.0004 / 0.0001). Keep `user_id`.
+
+The mechanism is worth understanding, because it is the exception to
+"personalisation is dead here". Two-way `user x context` target encodings do
+NOT explain the gain — every one of them scores BELOW the context alone
+(user x tab 0.5545 vs tab 0.5789; user x dur_bucket 0.5106 vs 0.5323;
+user x tag1 0.5229; user x pos 0.5035), because splitting by user just makes
+the cell sparse. So the user embedding is not acting as an affinity term at
+all: it enters the MLP branch as a per-user offset that RESHAPES the function
+applied to the item and context features — group-wise modulation, which is
+exactly the one channel that can change GAUC (see the ranking-invariance trap
+above; a per-user constant added to the LOGIT cannot, but a per-user input to a
+nonlinearity can). Caveat on the size of the effect: dropping a field also
+shrinks the MLP input (9 x 16 -> 8 x 16) and removes parameters, so part of the
+-0.0091 is capacity rather than user signal. The sign is not in doubt.
+
+**User METADATA adds nothing — the `user_features_pure.csv` question is closed.**
+The file (27,285 users, 31 columns) was genuinely unused by the pipeline, and
+the argument for it is sound: these fields are constant within a user so they
+cannot rank rows alone, but through the FM's second-order term they could give
+a prior SHARED across users that a sparse per-user embedding cannot learn for
+rare users. Tested properly, it is empty:
+
+| arm | encoded fields | 3-seed primary |
+|---|---|---|
+| control | 8 | **0.6047** (std 0.0001) |
+| + 7 core user fields | 15 | 0.6045 (std 0.0005) |
+| + all 22 user fields | 30 | 0.6048 (std 0.0001) |
+
+`is_lowactive_period` has ONE distinct value. The raw counts duplicate the
+dataset's own `*_range` buckets. The loader stays in `features.py` but is NOT
+registered by default.
+
+**The CONDITIONAL probe — use this before building any feature.** Marginal
+within-user GAUC answers the wrong question; what matters is signal remaining
+AFTER controlling for video quality. Method: bucket the train-fit video prior
+into 20 quantile bins (`qb`), target-encode `qb x C` on train, score on val,
+compare to `qb` alone (0.6383). It costs seconds instead of a training run:
+
+| conditional on video quality | delta |
+|---|---|
+| **tab** | **+0.0172** |
+| session position | +0.0011 |
+| hour / duration / tag1 / upload_type | +0.0002 .. -0.0003 |
+| all 7 user-metadata fields | -0.0004 .. +0.0001 |
+| `qb x tab x pos` | +0.0011 vs `qb x tab` |
+| `qb x tab x` hour / duration / tag1 / user_active_degree | **-0.0008 .. -0.0032** |
+
+`tab` is the ONLY context carrying real conditional signal. Note the power
+asymmetry when reading nulls: the user-metadata null is well powered
+(user_active_degree gives 9 x 20 = 180 cells over 1.1M rows), but the 3-way
+nulls are weaker, because a cell-count encoding cannot represent what a learned
+low-rank cross can. Do not quote the 3-way rows as proof against DCN-V2.
+
+**Candidate-relative features are empty, exactly as the invariance trap
+predicts.** Within-set percentile of the video prior scores 0.6382 alone vs
+0.6387 for the raw prior — ranking-identical. Conditional versions are all
+negative: `qb x` percentile -0.0181, deviation-from-set-mean -0.0061,
+set size -0.0049, gap-to-best -0.0005, set spread -0.0004.
+
+**Multi-hot `tag` is not better than primary-tag.** Mean-pooling per-tag target
+encodings over each video's full tag set scores 0.5607 marginal, against 0.5604
+for `tag1` alone and 0.5631 for the full tag string. Conditional on video
+quality all are +0.0001..+0.0003, and `qb x tab x pooled-tag` (0.6534) is BELOW
+`qb x tab` (0.6554). There is no combinatorial tag structure to recover, so
+attention pooling has nothing to find that mean pooling missed.
+
+**Embedding width: smaller is better, not larger.** 2-seed sweep at
+weight_decay 1e-6: k=8 **0.6050**, k=16 0.6046, k=32 0.6046; weight decay
+1e-5 0.6047 and 1e-4 0.6045 at k=16. The model is over-parameterised, not
+rank-limited. (Full 3-seed k in {4,8,16,32,64,128} curve — see results table.)
+
+**The `from ... import <list>` trap — this repo's most expensive recurring bug.**
+`pipeline/train.py` does `from pipeline.data.features import
+EXTRA_CATEGORICAL_FIELDS`, which binds the LIST OBJECT into train.py's
+namespace at import time. Two consequences, both of which have already cost
+real experiments:
+
+1. Rebinding the name in `features.py` (`features.EXTRA_CATEGORICAL_FIELDS =
+   [...]`, or an agent patch that reassigns the literal) is INVISIBLE to
+   `resolve_fields`, which reads train.py's own global. An A/B test written
+   that way silently measures the same configuration twice — the giveaway is
+   scores identical to 4+ decimals SEED BY SEED, which is not what a real tie
+   looks like. This is the same root cause as the earlier "two feature patches
+   both scored exactly 0.6024" incident.
+2. Therefore: to change the encoded field list at runtime, patch
+   `pipeline.train.EXTRA_CATEGORICAL_FIELDS`. To change it in code, MUTATE the
+   list (`.append(...)`) or edit the literal in features.py — and always print
+   `id_maps["fields"]` to confirm the field actually reached the encoder.
+
+**Verify a leakage guard, do not trust it.** The out-of-fold target encoding in
+`_fit_cross_te` was checked directly on train rows: `corr(encoding, label)` is
+0.3817 in-fold vs 0.3609 out-of-fold overall, but on cells with <= 3 rows it is
+**0.7531 in-fold vs 0.1748 OOF** — in-fold, the encoding of a small cell very
+nearly IS that row's label. Any future target encoding must be checked the same
+way, on the small-cell subset, where the leak actually lives.
+
+**Exposure counts are weak, and the transductive version is WORSE.** Video
+impression count in train 0.5396, the same count computed on the evaluation
+split itself 0.5189, against the train quality prior at 0.6387. There is
+therefore no reason to go near transductive eval-set statistics: the causal
+feature strictly dominates the gray-area one.
+
+**Temporal drift is not exploitable.** The `x date` oracle above looks like
+drift but is the oracle memorising validation labels in tiny cells.
+Exponentially recency-weighting the video prior over the 13 train days is flat
+(half-life 14d 0.6389, 7d 0.6389, uniform 0.6387) and a 2-day half-life HURTS
+(0.6342). Sliding-window / exponentially-decayed training data is dead here.
+
 ## Where to look next
 
 - Need RecSys architecture/method background? -> Tier 2 (`tier2_domain.md`)
