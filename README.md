@@ -171,6 +171,19 @@ Findings 1-2 came from reading the raw KuaiRand-Pure field spec and file manifes
 3. **`play_time_ms` is the label in disguise, not a feature.** The primary label is `long_view` (confirmed by the Starter Kit), and on real data a bare threshold on `play_time_ms/duration_ms` predicts it at 84.7% accuracy (corr=0.64) — matching why the official baseline's own field list uses `duration_ms` (video length) but never `play_time_ms` (watch time, i.e. the outcome). `pipeline/data/features.py` excludes it from `NUMERIC_SIGNAL_COLUMNS` for this reason; an earlier version of this pipeline (built before the Starter Kit confirmed `long_view` as the label) had this backwards.
 4. **The organizer already ran the "add more features" and "grow model capacity" experiments** (`starter_kit/ablation_features.py`) and found both flat (~0 gain, sometimes slightly negative) — because ranking is within-user, so anything constant within a user (most user-side features) can't move that user's order. This is now Tier-1 knowledge (`agent/skill_store/tier1_core.md`) specifically so the agent doesn't re-spend early iterations rediscovering it.
 
+5. **`upload_dt` has three distinct values.** Every one of the 7,583 videos was uploaded on 2022-04-09, -10 or -11. There is no video lifecycle in this dataset, which structurally rules out the entire temporal-dynamics family — freshness/decay curves, momentum, rolling and EWMA statistics, HAR, GARCH, Hawkes/self-exciting processes, Kalman/state-space filters, change-point detection and ARIMA-family forecasting. Confirmed independently: exponentially recency-weighting the video-quality prior over the 13 training days is flat (0.6389 vs 0.6387 uniform) and a 2-day half-life actively hurts (0.6342).
+6. **`author_id` and `music_id` are the video prior in disguise.** 87% of authors and 98% of music_ids own exactly one video. Target-encoded, `corr(video_te, author_te) = 0.985` and `corr(video_te, music_te) = 0.987`, so their strong-looking standalone scores (0.6367 / 0.6365) carry nothing the `video_id` embedding lacks. Only `tag` is a genuine pooling level (110 values, median 10 videos each, corr 0.458 with the video prior). This finding corrected one of our own top-ranked experiment recommendations, which had been made from a marginal score without checking entity granularity.
+7. **`tab` is a reordering signal that exists for only 40% of users.** It is the one context with substantial conditional signal (+0.0172 over the video-quality bucket), but 60% of validation users see a single tab, and for them it contributes **+0.0001** — a within-user-constant feature cannot reorder anything. Within any single tab the long_view rate is almost perfectly monotone in quality (corr +0.989 / +0.993 / +0.990), so `tab` never re-ranks inside itself; its entire effect is the level gap *between* tabs, which run from 0.004 (tab 3) to 0.489 (tab 4).
+8. **The benchmark's signal decomposes into roughly equal thirds.** Video quality alone reaches primary 0.5807; adding `tab` reaches 0.5877; a GBDT over all clean features reaches 0.5961; the neural model reaches 0.6048. This refutes the tempting summary that ranking is essentially *f(video quality, tab)* — a third of the signal is captured only by learned structure that no named feature reproduces. See `docs/research_process.md` for the full derivation and for what remains unexplained.
+
+## Research record
+
+`docs/research_process.md` is the full account of this investigation: every hypothesis considered, what was dropped and on what evidence, the measured result of each experiment, and the reasoning connecting them. It also records our own process failures and the two occasions where a headline hypothesis of ours was refuted by measurement.
+
+It uses an explicit status vocabulary, because "tested and found nothing" and "the dataset cannot express this" are very different claims: `SUPPORTED`, `WEAK`, `NULL`, `REJECTED_STRUCTURALLY`, `NOT_IDENTIFIABLE`, `NOT_APPLICABLE`. Roughly 90 method families were triaged; the majority are `REJECTED_STRUCTURALLY`, which is a statement about this benchmark, not about the methods.
+
+`docs/backlog_triage.md` maps a specific ~95-item method backlog onto that evidence, item by item.
+
 ## File map
 
 ```
@@ -217,7 +230,8 @@ agent/                    the autonomous agent
     retriever.py                        tiered retrieval logic
 
 config/agent_config.yaml   all tunables, confirmed against the Starter Kit (see below)
-docs/                       results_table.md (generated), devpost_writeup.md (draft)
+docs/                       research_process.md (full research record), backlog_triage.md,
+                            results_table.md (generated), devpost_writeup.md (draft)
 logs/                       generated at runtime: iterations.jsonl, interventions.jsonl, pitfalls.json, resource_usage.json
 ```
 

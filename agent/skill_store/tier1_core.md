@@ -324,6 +324,81 @@ rare users. Tested properly, it is empty:
 dataset's own `*_range` buckets. The loader stays in `features.py` but is NOT
 registered by default.
 
+**NESTED CEILING — the honest characterisation of this benchmark. Read this
+before quoting any single-number ceiling claim, including my own earlier "98%
+of the item-quality ceiling".**
+
+| model | GAUC | nDCG@5 | primary | increment |
+|---|---|---|---|---|
+| M0 video quality prior only | 0.6387 | 0.5227 | 0.5807 | — |
+| M1 + tab (video x tab encoding) | 0.6479 | 0.5275 | 0.5877 | +0.0070 |
+| M2 + ALL clean features (LightGBM) | 0.6593 | 0.5329 | 0.5961 | +0.0084 |
+| M3 neural model | 0.6716 | 0.5378 | 0.6048 | +0.0087 |
+
+The increments are ROUGHLY EQUAL THIRDS. This kills the tempting summary that
+"ranking = f(video quality, tab) + noise": quality + tab reaches 0.5877 while
+the model reaches 0.6048, and that 0.0171 gap is over five times our whole
+margin over the official baseline (+0.0032). The defensible statement is
+narrower: item quality is the largest single factor, `tab` is the only other
+context with substantial conditional signal, and a comparable third is captured
+only by LEARNED interactions that no named feature reproduces.
+
+That last part reconciles two results that look contradictory: the residual
+probe finds NOTHING predicting the model's errors, yet the model beats a GBDT
+over the same clean features by +0.0087. The probe can only test features we
+can NAME and encode as cell counts. Whatever the network exploits is not
+expressible that way. So a null residual probe is evidence about named
+features, NOT evidence that the model is at its ceiling.
+
+Method note: M2's LightGBM scores 0.5961 where the earlier LambdaMART attempt
+scored 0.5901. The difference is dropping within-user-constant features and
+fitting the video-quality prior OUT-OF-FOLD on train. GBDT feature gain ranks
+`tab` (902k) ABOVE the quality prior (594k), consistent with the tab analysis.
+
+**WHAT `tab` IS: a pure REORDERING signal, and it only exists for the users who
+span tabs.** `tab` is the only context with real conditional signal
+(+0.0172 over the video-quality bucket). Decomposed:
+
+| segment | rows | qb | qb x tab | delta | model |
+|---|---|---|---|---|---|
+| single-tab users | 53,339 | 0.6007 | 0.6008 | **+0.0001** | 0.6197 |
+| multi-tab users | 71,570 | 0.6695 | 0.7008 | **+0.0314** | 0.7147 |
+
+39.8% of validation users see more than one tab (57.3% of rows). For the other
+60%, `tab` is constant within the user and contributes EXACTLY NOTHING — the
+within-user-constant rule again, now confirmed empirically rather than argued.
+Within a tab, the long_view rate is almost perfectly monotone in quality bucket
+(corr +0.989 / +0.993 / +0.990 for tabs 1 / 4 / 2), so `tab` never re-ranks
+inside itself: the whole effect is the LEVEL gap between tabs (tab 0 runs
+0.025-0.066, tab 4 runs 0.144-0.705). The model already beats the qb x tab
+reference on BOTH segments, so this signal is not sitting unused.
+
+**THE RESIDUAL IS STRUCTURELESS — the strongest single piece of ceiling
+evidence.** Method (better than an ablation, because it is a direct test): take
+the trained model, compute its residual on TRAIN, fit a smoothed encoding of
+that residual on feature X, add alpha * enc_X to the VALIDATION logit, sweep
+alpha, keep the best. Result, against a 0.6716 baseline:
+
+| residual ~ X | best delta |
+|---|---|
+| tab / pos_bucket / tag1 / user_id | +0.0000 |
+| upload_type | +0.0002 |
+| author_id / video_id / duration | +0.0001 |
+| qb x tab | -0.0001 |
+| tab x pos_bucket | -0.0000 |
+| qb x tab x pos_bucket | -0.0002 |
+
+Nothing available predicts what the model gets wrong. Before proposing any new
+feature or architecture, run this probe against it — it costs one training run.
+
+**Conditional permutation importance is CONFOUNDED on this feature set.**
+Permuting within (quality bucket x tab) strata gives video_id -0.0091,
+author_id -0.0074, tag1 -0.0073, upload_type -0.0026, pos_bucket -0.0029. But
+author_id, tag1 and upload_type are DETERMINISTIC FUNCTIONS of video_id, so
+permuting them manufactures video/tag pairs that cannot exist and the drop
+measures out-of-distribution sensitivity, not information content. Only
+pos_bucket is cleanly interpretable here. Use the residual probe instead.
+
 **The CONDITIONAL probe — use this before building any feature.** Marginal
 within-user GAUC answers the wrong question; what matters is signal remaining
 AFTER controlling for video quality. Method: bucket the train-fit video prior

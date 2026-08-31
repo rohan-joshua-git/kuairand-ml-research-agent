@@ -171,10 +171,18 @@ class TrainResult:
 
 class FactorizationMachineWithMLP(nn.Module):
     """Combination of Factorization Machine and a two-layer MLP branch
-    ([32, 16] with ReLU activations) taking concatenated sparse embeddings as input."""
+    ([32, 16] with ReLU activations) taking concatenated sparse embeddings as input.
 
-    def __init__(self, total_dim: int, num_fields: int, k: int = 16):
+    `use_fm` / `use_mlp` exist to DECOMPOSE the model's advantage: running
+    FM-only and MLP-only against the full model attributes the gain to the
+    pairwise interaction term, the nonlinear branch, or their combination.
+    Both default True, which is the shipped model.
+    """
+
+    def __init__(self, total_dim: int, num_fields: int, k: int = 16,
+                 use_fm: bool = True, use_mlp: bool = True):
         super().__init__()
+        self.use_fm, self.use_mlp = use_fm, use_mlp
         self.embedding = nn.Embedding(total_dim, k)
         self.linear = nn.Embedding(total_dim, 1)
         self.bias = nn.Parameter(torch.zeros(1))
@@ -187,24 +195,25 @@ class FactorizationMachineWithMLP(nn.Module):
             nn.Linear(32, 16),
             nn.ReLU(),
             nn.Linear(16, 1)
-        )
+        ) if use_mlp else None
 
         nn.init.normal_(self.embedding.weight, std=0.01)
         nn.init.zeros_(self.linear.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         e = self.embedding(x)                      # (B, F, k)
-        
-        # FM part
-        summed = e.sum(dim=1)                      # (B, k)
-        interaction = 0.5 * ((summed ** 2).sum(dim=1) - (e ** 2).sum(dim=(1, 2)))
-        fm_out = self.bias + self.linear(x).sum(dim=(1, 2)) + interaction
 
-        # MLP part
-        mlp_in = e.view(e.size(0), -1)             # (B, F * k)
-        mlp_out = self.mlp(mlp_in).squeeze(-1)     # (B,)
+        # First-order term is always present; it is what an FM-free model keeps.
+        out = self.bias + self.linear(x).sum(dim=(1, 2))
 
-        return fm_out + mlp_out
+        if self.use_fm:
+            summed = e.sum(dim=1)                  # (B, k)
+            out = out + 0.5 * ((summed ** 2).sum(dim=1) - (e ** 2).sum(dim=(1, 2)))
+
+        if self.use_mlp:
+            out = out + self.mlp(e.view(e.size(0), -1)).squeeze(-1)
+
+        return out
 
 
 class CrossNetV2(nn.Module):
@@ -367,7 +376,11 @@ def run_training(
         model = DCNv2(total_dim=id_maps["total_dim"], num_fields=num_fields, k=embed_dim,
                       cross_layers=cross_layers, rank=cross_rank).to(device)
     else:
-        model = FactorizationMachineWithMLP(total_dim=id_maps["total_dim"], num_fields=num_fields, k=embed_dim).to(device)
+        model = FactorizationMachineWithMLP(
+            total_dim=id_maps["total_dim"], num_fields=num_fields, k=embed_dim,
+            use_fm=model_type in ("deepfm", "fm"),
+            use_mlp=model_type in ("deepfm", "mlp"),
+        ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     loss_fn = nn.BCEWithLogitsLoss()
 
