@@ -1,0 +1,31 @@
+{
+  "frozen_config": {
+    "model": "DeepFM-lite",
+    "ensemble": "10-seed rank-average",
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "embed_dim": 16,
+    "lr": 0.001,
+    "weight_decay": 1e-06,
+    "batch_size": 8192
+  },
+  "artifact_sha256": {
+    "submissions/submission_valid.csv": "1fd3f7c0ef47d1dd9fa1792b610f8c512e70765db02cd89098db178c559a46e2",
+    "submissions/submission_test.csv": "7f460171bbe0710244e3486c79d9a2e4342333203ade2242be5887abb4c46f30"
+  },
+  "superseded_artifact_sha256": {
+    "submissions/previous_5seed/submission_test.csv": "ebc9432a29ea67786aaddc72720345501fa60e0e8ea9c3b46e1dc92af45ffd40",
+    "submissions/previous_5seed/submission_valid.csv": "67902fdc7ffb0a40246c8e5a0afd2354bed079db59c4f0ecced5a958e1606429"
+  },
+  "note": "Submission CSVs are gitignored and regenerable. Hashes recorded here so the exact artifact can be verified. Final config: DeepFM-lite, 10-seed rank-average, seeds 0-9, validation primary 0.6053 (GAUC 0.6724 / nDCG@5 0.5382), scored by starter_kit/evaluate.py via submit.py --score on the valid split only."
+}
