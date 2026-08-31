@@ -47,7 +47,9 @@ from pipeline.data.loader import KuaiRandSplit, load_config, load_split
 from pipeline.evaluate import RankingMetrics, compute_ranking_metrics
 
 # Mirrors starter_kit/data.py FIELDS — the official baseline's field list.
-CATEGORICAL_FIELDS = ["user_id", "video_id", "author_id", "tab", "dur_bucket"]
+# The official baseline's five fields, plus pos_bucket (session position),
+# which is built in pipeline/data/features.py and measured there.
+CATEGORICAL_FIELDS = ["user_id", "video_id", "author_id", "tab", "dur_bucket", "pos_bucket"]
 N_DUR_BUCKETS = 10
 
 

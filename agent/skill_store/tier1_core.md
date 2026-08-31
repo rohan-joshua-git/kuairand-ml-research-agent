@@ -148,7 +148,7 @@ of single signals, on a 4,000-user validation sample (0.5 = no signal):
 |---|---|
 | Train-derived smoothed video long_view prior | **0.6453** |
 | `tab` | 0.5387 |
-| Session position (impression order within user-day) | 0.5148 |
+| Session position (impression order within user-day) | 0.5148 — **usable, now in the pipeline** |
 | `duration_ms` | 0.4865 |
 | `hourmin` | 0.4867 |
 | **user x author affinity** (train-derived) | **0.4981 — none** |
@@ -173,9 +173,18 @@ item-quality prior gets to 0.6453 of that on its own.
    engineered prior/context features. It spends its top splits on
    within-user-CONSTANT features (`user_rate`, `user_n`) which cannot affect
    within-user order. If retried, drop every user-constant feature first.
-5. **Seed ensembling is the one measured win: 5-seed rank-average = 0.6028 vs
+5. **Seed ensembling is a measured win: 5-seed rank-average = 0.6028 vs
    0.6017 single** (+0.0011). Rank-average, not score-average — only order is
    scored. Applied at submission time only, so it does not slow the loop.
+6. **Session position is a measured win: adding `pos_bucket` as a 6th
+   categorical field moved valid primary 0.6017 -> 0.6024** (GAUC 0.6676 ->
+   0.6681, nDCG@5 0.5358 -> 0.5366). It is built in
+   `pipeline/data/features.py`. Causal by construction: a cumcount over
+   time-ordered rows within a user-day counts only PRECEDING impressions, uses
+   no labels, and is known at serving time. This is the general lesson —
+   **only signals that vary WITHIN a user can change that user's ranking**, so
+   look for context that changes across a user's impressions rather than more
+   user attributes.
 
 **Per-user candidate lists are tiny**: median 4 impressions, 63.7% of users
 have <= 5. So nDCG@5 is effectively full-list nDCG for most users, and there

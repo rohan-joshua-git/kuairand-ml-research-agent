@@ -138,10 +138,25 @@ reads back into its prompt each iteration so it does not repeat a failure.
 
 ## Results
 
-**The agent converged at parity with the official baseline; it did not beat
-it.** Final validation primary **0.6017** vs the published **0.6016**. The
-submitted artifact is a 5-seed rank-averaged ensemble of that converged
-pipeline, which measures **0.6028** on validation (+0.0012 over baseline).
+**Submitted: validation primary 0.6036 vs the official baseline 0.6016 —
++0.0020, both metrics up** (GAUC 0.6674 -> 0.6702, nDCG@5 0.5357 -> 0.5371),
+scored by the organizer's own `submit.py --score`.
+
+**The autonomous agent did not produce that gain, and we are not going to
+imply otherwise.** The agent converged at parity, 0.6017. The +0.0020 comes
+from two human changes made after analysing why it plateaued: a
+session-position feature (0.6017 -> 0.6024) and a 5-seed rank-averaged
+ensemble (-> 0.6036). Both are described below, and the results table
+attributes every step.
+
+| Step | Valid primary | Author |
+|---|---|---|
+| Official FM baseline (published) | 0.6016 | organizer |
+| Our editable pipeline (torch FM, official 5 fields) | 0.6017 | human |
+| Agent's 3 iterations | best 0.6013, all rejected | **agent** |
+| + session-position feature | 0.6024 | human |
+| + 5-seed ensemble (submitted) | **0.6036** | human |
+
 Per-iteration trajectory, resource usage and the intervention count are in
 `docs/results_table.md`, generated from `logs/iterations.jsonl`.
 

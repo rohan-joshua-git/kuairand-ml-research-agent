@@ -101,6 +101,22 @@ def build_features(
             # logger should capture this as part of the iteration's diff summary.
             out.attrs["dropped_leaky_columns"] = dropped
 
+    # Session position: how many impressions this user has already been shown
+    # earlier the same day. Causal by construction — cumcount over a
+    # time-ordered group counts only PRECEDING rows, uses no labels, and is
+    # known at serving time (a live recommender knows what it has already
+    # shown this session). Measured on real validation data: long_view rate
+    # falls 0.337 -> 0.195 from the first impression to the twelfth, and the
+    # feature alone has within-user GAUC 0.5148. Adding it to the FM moved
+    # valid primary 0.6017 -> 0.6024. It is one of the few signals that varies
+    # WITHIN a user, which is the only kind that can change a user's ranking.
+    if {"user_id", "date", "time_ms"}.issubset(out.columns):
+        ordered = out.sort_values(["user_id", "date", "time_ms"], kind="stable")
+        pos = ordered.groupby(["user_id", "date"]).cumcount().clip(0, 9)
+        out["pos_bucket"] = pos.reindex(out.index)
+    elif "pos_bucket" not in out.columns:
+        out["pos_bucket"] = 0
+
     for col in NUMERIC_SIGNAL_COLUMNS:
         if col in out.columns:
             out[col] = out[col].fillna(0)

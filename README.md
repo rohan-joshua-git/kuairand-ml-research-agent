@@ -29,9 +29,26 @@ The organizer's KuaiRand-Pure Starter Kit (vendored verbatim in [`starter_kit/`]
 
 ## Results (measured, not projected)
 
-**The agent did not beat the official baseline. It converged at parity.** That
-is the honest headline; the delta is scored continuously, so an accurate
-negative is worth more than an inflated claim.
+**Submitted result: validation primary 0.6036 vs the official baseline's
+0.6016 — a delta of +0.0020, with both metrics up** (GAUC 0.6674 -> 0.6702,
+nDCG@5 0.5357 -> 0.5371). Scored by the organizer's own
+`starter_kit/submit.py --score`, not by our code.
+
+**Credit where it is due: the autonomous agent did not produce that gain.**
+The agent converged at parity (0.6017); the +0.0020 came from two
+human-authored changes made after analysing why it plateaued — a session-position
+feature and a seed ensemble, both described below. We separate the two
+because the autonomy criterion is scored on what the agent did, not on what
+the final number is.
+
+| Step | Valid primary | Author |
+|---|---|---|
+| Official FM baseline (published) | 0.6016 | organizer |
+| Our editable pipeline, torch FM over the official 5 fields | 0.6017 | human |
+| Agent's 3 iterations (BPR / multi-task / ListNet) | best 0.6013 — all rejected | **agent** |
+| + `pos_bucket` session-position feature | 0.6024 | human |
+| + 5-seed rank-averaged ensemble (submitted) | **0.6036** | human |
+
 
 Run of 2026-08-31, Gemini backend, scored by the vendored
 `starter_kit/evaluate.py` on the validation split:
@@ -44,11 +61,17 @@ Run of 2026-08-31, Gemini backend, scored by the vendored
 | 2 | Agent: multi-task auxiliary `is_click` head (weight 0.2) | 0.6670 | 0.5356 | 0.6013 | −0.0004 |
 | 3 | Agent: listwise ListNet cross-entropy loss | 0.6655 | 0.5353 | 0.6004 | −0.0013 |
 
-Converged under the official rule (ε=0.002, N=3). Final submitted checkpoint
-is the iteration-0 pipeline at **primary 0.6017 vs the published baseline
-0.6016 — a delta of +0.0001**, which is inside seed noise (published 5-seed
-std 0.0008). Every non-improving patch was rolled back automatically, so the
-working tree holds the submitted state.
+Converged under the official rule (ε=0.002, N=3) at **0.6017**, a delta of
++0.0001 over baseline — inside seed noise (published 5-seed std 0.0008). Every
+non-improving patch was rolled back automatically, so the working tree holds
+the best-known state.
+
+The submitted artifact then adds the two post-hoc human changes above, giving
+**0.6036 (+0.0020)**. Reproduce it with:
+
+```bash
+python -m pipeline.make_submission --out-dir submissions --ensemble-seeds 5
+```
 
 Cost: 38,361 tokens, 0.118 wall-clock hours, 0 GPU-hours (CPU-only).
 **Manual interventions: 1** — see [Autonomy accounting](#autonomy-accounting).
