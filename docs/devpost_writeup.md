@@ -138,24 +138,31 @@ reads back into its prompt each iteration so it does not repeat a failure.
 
 ## Results
 
-**Submitted: validation primary 0.6036 vs the official baseline 0.6016 —
-+0.0020, both metrics up** (GAUC 0.6674 -> 0.6702, nDCG@5 0.5357 -> 0.5371),
+**Submitted: validation primary 0.6044 vs the official baseline 0.6016 —
++0.0028, both metrics up** (GAUC 0.6674 -> 0.6710, nDCG@5 0.5357 -> 0.5379),
 scored by the organizer's own `submit.py --score`.
 
-**The autonomous agent did not produce that gain, and we are not going to
-imply otherwise.** The agent converged at parity, 0.6017. The +0.0020 comes
-from two human changes made after analysing why it plateaued: a
-session-position feature (0.6017 -> 0.6024) and a 5-seed rank-averaged
-ensemble (-> 0.6036). Both are described below, and the results table
-attributes every step.
+**The single largest improvement was found by the agent, autonomously.** It
+proposed a DeepFM-lite architecture — a parallel [32, 16] MLP branch beside
+the FM's linear and pairwise terms — which scored 0.6045, cleared ε=0.002
+against its own best, passed the compression gate, and was checkpointed. It
+proposed that *after* its first, larger DeepFM attempt crashed the smoke test
+and was rolled back automatically.
 
 | Step | Valid primary | Author |
 |---|---|---|
 | Official FM baseline (published) | 0.6016 | organizer |
 | Our editable pipeline (torch FM, official 5 fields) | 0.6017 | human |
-| Agent's 3 iterations | best 0.6013, all rejected | **agent** |
 | + session-position feature | 0.6024 | human |
-| + 5-seed ensemble (submitted) | **0.6036** | human |
+| **+ agent's DeepFM-lite MLP branch (accepted, gate-passed)** | **0.6045** | **agent** |
+| + 5-seed ensemble (submitted) | 0.6044 | human |
+
+Two honest notes. The ensemble is neutral on the agent's architecture (0.6044
+against a single-seed range of 0.6040–0.6047), though it was worth +0.0012 on
+the plain FM; we kept it for variance reduction on unseen data, not as a
+measured win. And iteration 6 scored 0.6050 — higher than the submitted
+checkpoint — but cleared the accepted best by only +0.0005, below ε, so it was
+rejected and rolled back rather than shipped.
 
 Per-iteration trajectory, resource usage and the intervention count are in
 `docs/results_table.md`, generated from `logs/iterations.jsonl`.

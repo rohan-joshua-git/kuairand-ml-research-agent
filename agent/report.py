@@ -58,14 +58,31 @@ def generate_results_table(cfg: dict | None = None) -> str:
     scored = [(i, it) for i, it in enumerate(iterations)
               if isinstance(it.get("metrics", {}).get("primary"), (int, float))
               and "baseline reproduction" not in it.get("hypothesis", "")]
-    best_row = max(scored, key=lambda pair: pair[1]["metrics"]["primary"])[0] if scored else None
+    # The submitted checkpoint is the last ACCEPTED one, not the highest raw
+    # score. An iteration can score higher and still be rejected — for failing
+    # to clear epsilon, or for failing the compression gate — in which case its
+    # code was rolled back and is not what gets submitted. Marking the raw
+    # maximum would name a checkpoint that no longer exists on disk.
+    accepted = [pair for pair in scored if pair[1]["metrics"].get("accepted_as_new_best")]
+    if accepted:
+        best_row = max(accepted, key=lambda pair: pair[1]["metrics"]["primary"])[0]
+    elif scored:
+        # Nothing was accepted: the starting pipeline (iteration 0) is what ships.
+        zero = [pair for pair in scored if pair[1]["iteration"] == 0]
+        best_row = zero[-1][0] if zero else max(scored, key=lambda pair: pair[1]["metrics"]["primary"])[0]
+    else:
+        best_row = None
 
     lines.append("| Iteration | Hypothesis | GAUC | nDCG@5 | Primary | Delta vs prev best | Delta vs baseline | Unbiased probe | Accepted | Errors |")
     lines.append("|---|---|---|---|---|---|---|---|---|---|")
     for row_index, it in enumerate(iterations):
         m = it.get("metrics", {})
         errors = "; ".join(it.get("errors", [])) or "-"
-        marker = " **<- BEST (submitted)**" if row_index == best_row else ""
+        marker = " **<- SUBMITTED (accepted best)**" if row_index == best_row else ""
+        if row_index != best_row and isinstance(m.get("primary"), (int, float)) and best_row is not None:
+            best_primary = iterations[best_row].get("metrics", {}).get("primary")
+            if isinstance(best_primary, (int, float)) and m["primary"] > best_primary:
+                marker = " *(scored higher but rejected -> rolled back)*"
         unbiased = m.get("unbiased_primary")
         unbiased_s = f"{unbiased:.4f}" if isinstance(unbiased, (int, float)) else "-"
         d_base = m.get("delta_vs_official_baseline")

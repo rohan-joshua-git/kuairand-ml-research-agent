@@ -29,25 +29,38 @@ The organizer's KuaiRand-Pure Starter Kit (vendored verbatim in [`starter_kit/`]
 
 ## Results (measured, not projected)
 
-**Submitted result: validation primary 0.6036 vs the official baseline's
-0.6016 — a delta of +0.0020, with both metrics up** (GAUC 0.6674 -> 0.6702,
-nDCG@5 0.5357 -> 0.5371). Scored by the organizer's own
+**Submitted result: validation primary 0.6044 vs the official baseline's
+0.6016 — a delta of +0.0028, with both metrics up** (GAUC 0.6674 -> 0.6710,
+nDCG@5 0.5357 -> 0.5379). Scored by the organizer's own
 `starter_kit/submit.py --score`, not by our code.
 
-**Credit where it is due: the autonomous agent did not produce that gain.**
-The agent converged at parity (0.6017); the +0.0020 came from two
-human-authored changes made after analysing why it plateaued — a session-position
-feature and a seed ensemble, both described below. We separate the two
-because the autonomy criterion is scored on what the agent did, not on what
-the final number is.
+**The agent produced the largest single improvement, autonomously.** Its
+DeepFM-lite hypothesis (a parallel [32, 16] MLP branch alongside the FM's
+linear and pairwise terms) scored 0.6045, cleared ε=0.002 against its own
+best, passed the compression gate, and was checkpointed. It proposed this
+*after* its larger DeepFM patch crashed the smoke test and was rolled back
+automatically.
+
+We still separate human from agent contributions below, because the autonomy
+criterion is scored on what the agent did rather than on the final number.
 
 | Step | Valid primary | Author |
 |---|---|---|
 | Official FM baseline (published) | 0.6016 | organizer |
 | Our editable pipeline, torch FM over the official 5 fields | 0.6017 | human |
-| Agent's 3 iterations (BPR / multi-task / ListNet) | best 0.6013 — all rejected | **agent** |
 | + `pos_bucket` session-position feature | 0.6024 | human |
-| + 5-seed rank-averaged ensemble (submitted) | **0.6036** | human |
+| **\+ agent's DeepFM-lite MLP branch (accepted, gate-passed)** | **0.6045** | **agent** |
+| + 5-seed rank-averaged ensemble (submitted) | **0.6044** | human |
+
+The ensemble is **neutral on the agent's architecture** (0.6044 against a
+single-seed range of 0.6040–0.6047) even though it was worth +0.0012 on the
+plain FM (0.6024 -> 0.6036). We kept it for variance reduction on unseen data,
+not because it measured better here — reporting it as a win would be
+overclaiming.
+
+Run 1 (from a weaker starting pipeline) and run 2 both converged without an
+accepted improvement; run 3 is the one that found the MLP branch. All three
+trajectories are in `logs/`, not just the successful one.
 
 
 Run of 2026-08-31, Gemini backend, scored by the vendored
@@ -61,13 +74,14 @@ Run of 2026-08-31, Gemini backend, scored by the vendored
 | 2 | Agent: multi-task auxiliary `is_click` head (weight 0.2) | 0.6670 | 0.5356 | 0.6013 | −0.0004 |
 | 3 | Agent: listwise ListNet cross-entropy loss | 0.6655 | 0.5353 | 0.6004 | −0.0013 |
 
-Converged under the official rule (ε=0.002, N=3) at **0.6017**, a delta of
-+0.0001 over baseline — inside seed noise (published 5-seed std 0.0008). Every
-non-improving patch was rolled back automatically, so the working tree holds
-the best-known state.
+Every non-improving patch was rolled back automatically, so the working tree
+always holds the best-known state — which is what the submission step
+re-trains from. Note iteration 6 scored 0.6050, *higher* than the submitted
+0.6045 checkpoint, but only +0.0005 over the accepted best: below ε, so it was
+rejected and rolled back. The results table flags it explicitly rather than
+quietly reporting the higher number.
 
-The submitted artifact then adds the two post-hoc human changes above, giving
-**0.6036 (+0.0020)**. Reproduce it with:
+Reproduce the submission with:
 
 ```bash
 python -m pipeline.make_submission --out-dir submissions --ensemble-seeds 5
@@ -256,6 +270,21 @@ All of these were unknowns pending the Starter Kit; all are now confirmed and wi
 ## Limitations
 
 - **New-file creation is out of scope for the editor.** `agent/code_editor.py` rewrites whole files at fixed paths, so the agent can change the loss, the model and its own ablation grid, but cannot add a new module under `pipeline/model/architectures/`. That needs a create-a-file flow the current backup/restore-one-path mechanism does not support.
+- **The agent's feature hypotheses have a narrow path into the model, and we
+  measured this the hard way.** Across two runs, four separate `features.py`
+  patches adding a video-quality prior all returned *bit-identical* scores
+  (0.6024 to four decimals). Different patches cannot produce identical
+  metrics unless the new column is never used — and it wasn't. Originally the
+  encoded field list lived in `train.py`, a different file, and a patch is one
+  whole-file rewrite, so the agent could not close the loop. We added an
+  `EXTRA_CATEGORICAL_FIELDS` registry in `features.py` (verified: the same
+  hypothesis then moves the score to 0.6027). A second constraint remains: the
+  FM consumes **categorical fields only**, so a continuous feature — like the
+  out-of-fold target encoding the agent later proposed — still has no path in
+  unless it is bucketed. We stopped intervening at that point deliberately:
+  the categorical version of that exact idea measured +0.0003, below the
+  0.0008 seed-noise floor, so adding a numeric path would have cost an
+  intervention to buy nothing measurable.
 - **Cross-file changes cost an iteration.** Each patch is one whole-file rewrite, so a hypothesis needing a model constructor change *and* a matching call-site change in `train.py` must either fit in one file or take two iterations. A broken interface is caught by the smoke test and rolled back — it costs an iteration, it does not corrupt state.
 - **GPU-hours are reported as 0.0 because the pipeline is CPU-only.** Wall-clock is reported separately and honestly; there is no `nvidia-smi` accounting because there is no GPU in the loop.
 - **The compression gate reasons about a summary, it does not re-train from it.** A stronger version would have the fresh reproducer actually re-run training from the compressed description and compare scores; as built, it is an LLM judgement over a deliberately terse summary with no access to validation scores.

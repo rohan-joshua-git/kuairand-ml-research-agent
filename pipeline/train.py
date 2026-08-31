@@ -76,27 +76,42 @@ class TrainResult:
     epoch_losses: list[float] = field(default_factory=list)
 
 
-class FactorizationMachine(nn.Module):
-    """Second-order FM over one-hot categorical fields sharing a single
-    embedding table (offsets make field values globally unique), matching
-    `starter_kit/baseline.py`'s formulation:
+class FactorizationMachineWithMLP(nn.Module):
+    """Combination of Factorization Machine and a two-layer MLP branch
+    ([32, 16] with ReLU activations) taking concatenated sparse embeddings as input."""
 
-        y = b + sum_i w[x_i] + 0.5 * ( (sum_i v[x_i])^2 - sum_i v[x_i]^2 )
-    """
-
-    def __init__(self, total_dim: int, k: int = 16):
+    def __init__(self, total_dim: int, num_fields: int, k: int = 16):
         super().__init__()
         self.embedding = nn.Embedding(total_dim, k)
         self.linear = nn.Embedding(total_dim, 1)
         self.bias = nn.Parameter(torch.zeros(1))
+
+        # MLP branch: input dim is num_fields * k
+        mlp_input_dim = num_fields * k
+        self.mlp = nn.Sequential(
+            nn.Linear(mlp_input_dim, 32),
+            nn.ReLU(),
+            nn.Linear(32, 16),
+            nn.ReLU(),
+            nn.Linear(16, 1)
+        )
+
         nn.init.normal_(self.embedding.weight, std=0.01)
         nn.init.zeros_(self.linear.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         e = self.embedding(x)                      # (B, F, k)
+        
+        # FM part
         summed = e.sum(dim=1)                      # (B, k)
         interaction = 0.5 * ((summed ** 2).sum(dim=1) - (e ** 2).sum(dim=(1, 2)))
-        return self.bias + self.linear(x).sum(dim=(1, 2)) + interaction
+        fm_out = self.bias + self.linear(x).sum(dim=(1, 2)) + interaction
+
+        # MLP part
+        mlp_in = e.view(e.size(0), -1)             # (B, F * k)
+        mlp_out = self.mlp(mlp_in).squeeze(-1)     # (B,)
+
+        return fm_out + mlp_out
 
 
 def _dur_bucket(duration_ms: pd.Series, edges: np.ndarray) -> np.ndarray:
@@ -177,7 +192,8 @@ def run_training(
     y_train = torch.tensor(resolve_label(train_feat).to_numpy(dtype=np.float32), dtype=torch.float32)
     val_label = resolve_label(val_feat)
 
-    model = FactorizationMachine(total_dim=id_maps["total_dim"], k=embed_dim).to(device)
+    num_fields = len(id_maps["fields"])
+    model = FactorizationMachineWithMLP(total_dim=id_maps["total_dim"], num_fields=num_fields, k=embed_dim).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-6)
     loss_fn = nn.BCEWithLogitsLoss()
 

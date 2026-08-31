@@ -1,0 +1,11 @@
+{
+  "smoke_fail_train": {
+    "id": "smoke_fail_train",
+    "symptom": "patch to train failed smoke test: smoke test exited 1",
+    "root_cause": "SMOKE_TEST_ERROR: name 'ml_part' is not defined\n",
+    "recovery": "rolled back automatically via code_editor.py",
+    "stage": "engineer",
+    "first_seen_iteration": 2,
+    "times_seen": 1
+  }
+}
