@@ -296,6 +296,49 @@ the harm worse. **Interpretation, not established:** the model's own user
 embedding already learns this modulation, and an explicit precomputed summary
 adds a redundant, coarser pathway that generalises worse.
 
+## How we built it: a human-relayed adversarial loop
+
+Development used two AI assistants in opposing roles, with a human relaying
+between them. **Claude Code** implemented, ran experiments and reported results.
+**OpenAI** received those reports and attacked them — challenging conclusions,
+demanding controls, proposing alternative explanations and setting stopping
+rules. A human passed messages both ways and made the calls.
+
+This was **not** an autonomous multi-agent system. The relay was manual. We
+document it because it changed outcomes we can point at:
+
+| The adversary's intervention | What it changed |
+|---|---|
+| "more seeds cannot hurt" is not true of a ranking metric | corrected an overstatement about variance before it reached the writeup |
+| run the oracle diagnostic *before* building a gate | killed the conditional-blending branch in one GBDT fit rather than a full gate pipeline |
+| add a *randomized* arm as a stronger negative control | produced the 4-arm design that made an in-fold leak diagnosable instead of reading as a failed hypothesis |
+| test early-vs-late estimation directly | refuted staleness, which we had been treating as the likely mechanism |
+| 0.8645 is the *label-oracle* ceiling, not "not a ceiling" | sharpened a claim that would not have survived review |
+| freeze the submission before further research | produced the frozen, hash-verified artifact every later experiment was measured against |
+
+The adversary rarely proposed better *models*. It proposed better *tests*, and
+repeatedly stopped work that would have produced a confident wrong answer.
+
+**This describes our development process, not the submitted system.** The agent
+runs on Google Gemini; no OpenAI or Anthropic model is called by the pipeline at
+scoring time.
+
+## Verified reproducibility
+
+The repository was cloned fresh from GitHub, data staged, and the pipeline
+re-run end to end. Both artifacts regenerate **byte-identical** to their
+recorded SHA-256s:
+
+```
+smoke test              0.4498908751631786   identical fingerprint
+baseline reproduction   0.6015 vs published 0.6016   MATCHES
+metric decomposition    1.599e-14 vs starter_kit/evaluate.py
+submission_valid.csv    HASH MATCH
+submission_test.csv     HASH MATCH
+official checker        124,909 / 170,588 rows, both pass
+official score (valid)  GAUC 0.6724 | nDCG@5 0.5382 | primary 0.6053
+```
+
 ## Team
 
 - **Rohan Joshua** — agent architecture and loop, evaluation protocol, research
@@ -327,6 +370,11 @@ nor the Starter Kit sanctions them.
 
 ## What's next
 
+- **Automate the adversarial loop.** The critique loop described above was
+  human-relayed. Wiring a second provider in as an automated adversary — one
+  model proposes, a different model attacks the claim and demands controls —
+  would make the critique a measurable part of the agent rather than a manual
+  step. This is the extension we would build first.
 - **Give the agent a signal it can actually exploit.** Our measurements say
   the ceiling here is item-quality estimation, which the FM already does well.
   The directions with any remaining room are content-side (video captions and

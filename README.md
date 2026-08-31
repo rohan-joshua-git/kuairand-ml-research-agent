@@ -26,6 +26,27 @@ Scored by the organizer's own `starter_kit/evaluate.py` via `submit.py --score`,
 
 Full provenance, including artifact SHA-256s, is in [`docs/results_table.md`](docs/results_table.md) and `submissions/FROZEN_CONFIG.json`.
 
+## Strategy
+
+The task is **within-user ranking**: each user is ranked only among their own
+logged impressions. That single fact drove every decision.
+
+1. **Reproduce the official baseline first**, using the organizer's own vendored
+   code rather than a reimplementation, so the starting point is not in doubt.
+2. **Let the agent edit a bounded surface.** LLM rewrites land only in an
+   allowlist of five files, behind a smoke test that rolls back on failure.
+   Every scored run trains in a fresh interpreter so a stale import can never
+   score the previous iteration's code.
+3. **Exploit what within-user ranking implies.** Anything constant within a user
+   cannot reorder that user's candidates — which rules out most user-side
+   features a priori and redirects effort to item and context signals that vary
+   across a user's own impressions.
+4. **Score through the organizer's evaluator**, never a local reimplementation,
+   so a validation number cannot quietly diverge from what the graded script
+   reports.
+5. **Make every candidate improvement survive a negative control** before it
+   counts. This is what the second half of the project became.
+
 ## What this project actually is
 
 The score moved +0.0037. The interesting part is not that number — it is that **every alternative explanation for it was tested and eliminated**, and that several apparently promising signals were killed by controls rather than accepted.
@@ -97,6 +118,18 @@ Its per-user decomposition of GAUC/nDCG@5 is verified against `starter_kit/evalu
 **Confirmation result.** Raw confirmation (0.6023) sits below selection (0.6083) — but a frozen model-free video prior drops by nearly the same amount (+0.0053 against the model's +0.0059), so that gap is population difficulty, not overfitting. The model's advantage over that reference is **+0.0250 on selection and +0.0242 on confirmation**: the learned advantage transfers to users never used for any decision.
 
 **Why the submission is an ensemble.** The mean gain is **not** established — 5-seed vs 1-seed is +0.00027, while same-model negative controls reach 0.00077. It ships for **variance**, which is established: single-seed std 0.00049 over 20 seeds against 5-seed std 0.00020, matching √n. On a one-shot submission the floor is what matters — worst single seed 0.6036, worst 5-seed ensemble 0.6046.
+
+**Clean-checkout verification.** The repository was cloned fresh from GitHub, data staged, and the whole pipeline re-run. Both submission artifacts regenerate **byte-identical** to their recorded SHA-256s, and the organizer's scorer returns the documented figure:
+
+```
+smoke test                  0.4498908751631786   identical fingerprint
+baseline reproduction       0.6015 vs published 0.6016   MATCHES
+metric decomposition        1.599e-14 vs starter_kit/evaluate.py
+submission_valid.csv        1fd3f7c0...46e2   HASH MATCH
+submission_test.csv         7f460171...4f30   HASH MATCH
+official checker            124,909 / 170,588 rows, both pass
+official score (valid)      GAUC 0.6724 | nDCG@5 0.5382 | primary 0.6053
+```
 
 **Reproducibility.** The reported 0.6053 was produced twice by independent paths — cached score matrix → `eval_protocol` decomposition, and `make_submission` → `aligned_rows`/`score_rows` → CSV → `starter_kit/evaluate.py`. They agree to four decimals on all three metrics, which establishes the reported number is the number the submitted artifact actually scores.
 
@@ -198,6 +231,42 @@ Research scripts (`scripts/seed_ensemble.py`, `error_slices.py`, `sweep_user_wd.
 | **Thaddus Lee** | Referee integration, crash checkpointing and resume, autonomous ablation targeting, Starter Kit and dataset integration, metric/convergence alignment |
 | **Waseem Akram** | Audit of all technical files and documentation — research audit and submission audit |
 
+## How this was built: a human-relayed adversarial loop
+
+Development used two AI assistants in opposing roles, with a human relaying
+between them:
+
+```
+   Claude Code (implementer)  --output-->  human  --relay-->  OpenAI (adversary)
+            ^                                                        |
+            |________________  human  <--critique--  ________________|
+```
+
+**Claude Code** implemented, ran experiments and reported results. **OpenAI**
+received those reports and attacked them — challenging conclusions, demanding
+controls, proposing alternative explanations, and setting stopping rules. A
+human passed messages in both directions and made the calls. This was
+**not** an autonomous multi-agent system; the relay was manual.
+
+It is worth documenting because it changed outcomes we can point at:
+
+| The adversary's intervention | What it changed |
+|---|---|
+| "more seeds cannot hurt" is not true of a ranking metric | corrected an overstatement about variance reduction before it reached the writeup |
+| run the oracle diagnostic *before* building a gate | killed the conditional-blending branch in one GBDT fit instead of a full gate pipeline |
+| add a *randomized* arm as a stronger negative control | gave the 4-arm design that made an in-fold leak diagnosable instead of reading as a failed hypothesis |
+| test early-vs-late estimation directly | refuted staleness, which we had been treating as the likely mechanism |
+| 0.8645 is the *label-oracle* ceiling, not "not a ceiling" | sharpened a claim that was loosely stated and would not have survived review |
+| freeze the submission before any further research | produced the frozen, hash-verified artifact that every later experiment was measured against |
+
+The pattern is that the adversary rarely proposed better *models* — it
+proposed better *tests*, and repeatedly stopped work that would have produced
+a confident wrong answer.
+
+**This describes the development process, not the submitted system.** The agent
+itself runs on Google Gemini; no OpenAI or Anthropic model is called by the
+pipeline at scoring time. See below.
+
 ## Development tools, APIs and assets
 
 **Tools:** VS Code, Claude Code (used as an AI coding assistant during development — disclosed for transparency; it is not part of the submitted system).
@@ -208,14 +277,36 @@ Research scripts (`scripts/seed_ensemble.py`, `error_slices.py`, `sweep_user_wd.
 
 **Data:** KuaiRand-Pure only, via the organizer's Starter Kit. No external training data, no pretrained weights, and the Zenodo caption/category supplements were treated as out of scope since neither the problem statement nor the Starter Kit sanctions them.
 
-## Limitations, and what we'd do with more time
+## Limitations
 
 - **The agent cannot create new files.** `agent/code_editor.py` rewrites whole files at fixed paths, so it can change the loss, the model and its own ablation grid, but cannot add a module. A create-a-file flow needs a different backup/restore mechanism.
 - **Continuous features have no path into the model.** The FM consumes categorical fields only, so a continuous feature must be bucketed. We stopped intervening here deliberately: the categorical version of the agent's proposal measured +0.0003, below the noise floor.
 - **Cross-file changes cost an iteration.** One patch is one whole-file rewrite. A broken interface is caught by the smoke test and rolled back — it costs an iteration, not state.
 - **The recorded trajectory predates three post-run compliance fixes.** Those fixes do not alter the model: every added parameter defaults to prior behaviour, and the smoke-test fingerprint is byte-identical across all of them.
 - **The compression gate reasons about a summary, it does not retrain from it.** A stronger version would have the fresh reproducer re-run training from the compressed description and compare scores.
-- **Given more time**, the one thread we would reopen is *why* an explicit user representation degrades a model whose implicit user representation demonstrably carries signal. We measured that it does, and eliminated noise, cardinality and staleness as explanations. The redundant-pathway account is currently interpretation, not measurement.
+
+## Future work
+
+- **Multi-provider adversarial auditing, automated.** The adversarial loop
+  described above was human-relayed. Wiring a second provider in as an
+  automated adversary — one model proposes, a different model attacks the
+  claim and demands controls — is the natural next version, and would make the
+  critique a measurable part of the agent rather than a manual step.
+- **Understand why an explicit user representation hurts.** We measured that it
+  does, and eliminated noise, cardinality and staleness. The redundant-pathway
+  account is interpretation, not measurement — the one thread genuinely worth
+  reopening.
+- **Make the compression gate retrain rather than reason.** It currently judges
+  a terse summary; the stronger version re-runs training from that summary and
+  compares scores.
+- **Alert the referee on the change in divergence, not its level.** The two
+  splits have structurally different label distributions, so the absolute gap
+  is uninformative.
+- **Persist "this scored worse" across runs.** The pitfall store records crashes
+  and gate warnings, so a fresh run would happily re-propose an approach already
+  measured as worse.
+- **New-file creation in the editor**, so the agent can add an architecture
+  module rather than only rewriting existing files.
 
 ---
 
