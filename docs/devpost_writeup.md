@@ -138,31 +138,44 @@ reads back into its prompt each iteration so it does not repeat a failure.
 
 ## Results
 
-**Submitted: validation primary 0.6044 vs the official baseline 0.6016 —
-+0.0028, both metrics up** (GAUC 0.6674 -> 0.6710, nDCG@5 0.5357 -> 0.5379),
+**Submitted: validation primary 0.6053 vs the official baseline 0.6016 —
++0.0037, both metrics up** (GAUC 0.6674 -> 0.6724, nDCG@5 0.5357 -> 0.5382),
 scored by the organizer's own `submit.py --score`.
+
+We claim **no hidden-test score**. It is scored once by the organizer, and a
+validation number compared against a test number would overstate progress.
 
 **The single largest improvement was found by the agent, autonomously.** It
 proposed a DeepFM-lite architecture — a parallel [32, 16] MLP branch beside
-the FM's linear and pairwise terms — which scored 0.6045, cleared ε=0.002
-against its own best, passed the compression gate, and was checkpointed. It
-proposed that *after* its first, larger DeepFM attempt crashed the smoke test
-and was rolled back automatically.
+the FM's linear and pairwise terms — which cleared ε=0.002 against its own
+best and was checkpointed. It proposed that *after* its first, larger DeepFM
+attempt crashed the smoke test and was rolled back automatically.
 
 | Step | Valid primary | Author |
 |---|---|---|
 | Official FM baseline (published) | 0.6016 | organizer |
 | Our editable pipeline (torch FM, official 5 fields) | 0.6017 | human |
 | + session-position feature | 0.6024 | human |
-| **+ agent's DeepFM-lite MLP branch (accepted, gate-passed)** | **0.6045** | **agent** |
-| + 5-seed ensemble (submitted) | 0.6044 | human |
+| **+ agent's DeepFM-lite MLP branch (accepted)** | **0.6045** | **agent** |
+| + 10-seed rank-average ensemble (submitted) | **0.6053** | human |
 
-Two honest notes. The ensemble is neutral on the agent's architecture (0.6044
-against a single-seed range of 0.6040–0.6047), though it was worth +0.0012 on
-the plain FM; we kept it for variance reduction on unseen data, not as a
-measured win. And iteration 6 scored 0.6050 — higher than the submitted
-checkpoint — but cleared the accepted best by only +0.0005, below ε, so it was
-rejected and rolled back rather than shipped.
+Three honest notes.
+
+**The ensemble's mean gain is not established.** 5-seed against 1-seed is
++0.00027, while negative controls comparing the *same* model to itself reach
+0.00077. It ships for **variance**, which is established: over 20 seeds the
+single-seed std is 0.00049 against a 5-seed std of 0.00020, matching sqrt(n).
+On a one-shot submission the floor is what matters — worst single seed 0.6036,
+worst 5-seed ensemble 0.6046.
+
+**We found our own champion figure was optimistic.** It had been recorded as
+0.6047 with a 3-seed std of 0.0001. Seeds 0-2 were a lucky triple; over 20
+seeds the mean is 0.60448 with std 0.00049 — an 8x larger spread. Every
+3-seed standard deviation in our earlier notes should be read accordingly.
+
+**Iteration 6 scored higher than the shipped checkpoint** (0.6050) but cleared
+the accepted best by only +0.0005, below ε, so it was rejected and rolled back
+rather than shipped.
 
 Per-iteration trajectory, resource usage and the intervention count are in
 `docs/results_table.md`, generated from `logs/iterations.jsonl`.
@@ -216,6 +229,101 @@ unbiased probe, which is its sanctioned use — and that distribution gap is
 also why our referee's absolute divergence is always large, so only the change
 in divergence across iterations is meaningful. We report that as an
 instrumentation weakness rather than claiming the referee caught something.
+
+### What we discovered by trying to falsify ourselves
+
+After the score converged we kept going, but as research rather than a leaderboard
+hunt: for each remaining unexplained signal, form a mechanism hypothesis and build
+the control that would expose a false positive. Seven investigations, every one
+with a control attached:
+
+| Hypothesis | Test | Result | Decision |
+|---|---|---|---|
+| `user_id` helps via affinity or capacity | row-level shuffle, parameters held fixed | identity **108%**, capacity **-8%** | capacity refuted |
+| The user embedding overfits, so shrink it | field-specific weight decay, 6 arms x 3 seeds | monotone **negative** | closed |
+| Performance decays across the eval window | frozen model-free reference on the same days | gap **+0.0008** | closed |
+| The gap to 0.8645 means signal is missing | simulate y ~ Bernoulli(q) from the calibrated model | irreducible **0.2556** > observed **0.2431** | closed |
+| Users differ in feature *sensitivity* | 4-arm, out-of-fold, permuted + randomized controls | **-0.0012**, CI excludes zero | closed |
+| Staleness explains that failure | early vs late estimation, sizes matched | **+0.00017** | refuted |
+| DeepFM/GBDT disagreement is exploitable | per-group oracle + quality-matched control | **+0.0023** of an apparent +0.0314 | closed |
+
+**Three of these are worth more than the score is.**
+
+*`user_id` encodes identity, not capacity.* Deleting it costs -0.0091, yet
+user-video affinity measures at chance three separate times. Permuting the
+row-to-user link while holding parameter count, MLP input width and code
+frequencies fixed loses the entire effect. The permutation has to be row-level:
+a bijective user-to-row remap is a symmetry of the model and trains to an
+identical result, which would have produced a convincing false null.
+
+*The published ceiling is unreachable by any model.* 0.8645 is the organizer's
+label-oracle ceiling and is correctly computed. But in a simulated world where
+our model IS the true conditional probability — nothing left to learn by
+construction — an oracle still beats it by 0.2556, while our real gap is 0.2431,
+smaller. A long_view is a coin flip; an oracle that sees the realised label wins
+by that margin regardless of model quality. The distance to 0.8645 is therefore
+not evidence of remaining headroom.
+
+*A per-group oracle is upward-biased, and here the bias was 12x the signal.* A
+per-user oracle over DeepFM and GBDT showed +0.0314 of apparent headroom, which
+would have justified days of gate-building. A quality-matched control — DeepFM
+degraded with calibrated noise to the GBDT's exact score level, carrying no
+information DeepFM lacks — reproduced +0.0291 of it. Real excess: +0.0023.
+
+### The leak we introduced, found, and fixed
+
+Our first sensitivity experiment produced a clean, significant result: real
+sensitivities scored -0.0048 with a CI excluding zero, while permuted and
+randomized versions of the identical fields were neutral.
+
+Noise being free while real values did damage is not how a failed hypothesis
+behaves — it is how a **leak** behaves. We had computed each user's statistic
+from that user's own training labels, so a training row's feature contained that
+row's label: an in-fold target encoding one level above where we had applied the
+out-of-fold rule. Rebuilding it so each row's band comes from that user's *other*
+folds recovered 75% of the drop.
+
+With only a control and a treatment arm this would have been filed as
+"sensitivities are harmful." The two null controls are what made it diagnosable.
+We report it because the discipline is the point, not because it flatters us.
+
+### What we measured versus what we believe
+
+Kept separate deliberately. **Measured:** sensitivities are reliably estimable
+(split-half 0.31-0.60), they decay 22-61% across a week, exposing them costs
+-0.0012, both null controls are neutral, and estimating from 6x more data makes
+the harm worse. **Interpretation, not established:** the model's own user
+embedding already learns this modulation, and an explicit precomputed summary
+adds a redundant, coarser pathway that generalises worse.
+
+## Team
+
+- **Rohan Joshua** — agent architecture and loop, evaluation protocol, research
+  experiments and controls, submission pipeline and provenance.
+- **Thaddus Lee** — referee integration, crash checkpointing and resume,
+  autonomous ablation targeting, Starter Kit and dataset integration,
+  metric/convergence alignment.
+- **Waseem Akram** — audit of all technical files and documentation; research
+  audit and submission audit.
+
+## Built with
+
+**Development tools:** VS Code, Claude Code (an AI coding assistant used during
+development; it is not part of the submitted system).
+
+**APIs:** Google Gemini — `gemini-3.5-flash` and `gemini-3.5-flash-lite`. The
+scored run used 91,430 tokens in 0.1965 h across 9 iterations, with 2 logged
+manual interventions. An Anthropic backend is implemented and selectable but was
+not used for the scored run.
+
+**Libraries:** PyTorch, pandas, numpy, scikit-learn, PyYAML, tqdm, google-genai,
+anthropic. LightGBM is used only by a research-branch diagnostic and is not a
+submission dependency.
+
+**Data:** KuaiRand-Pure only, via the organizer's Starter Kit. No external
+training data, no pretrained weights. The Zenodo caption and category
+supplements were treated as out of scope, since neither the problem statement
+nor the Starter Kit sanctions them.
 
 ## What's next
 

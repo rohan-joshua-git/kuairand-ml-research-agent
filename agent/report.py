@@ -90,7 +90,12 @@ def generate_results_table(cfg: dict | None = None) -> str:
     for row_index, it in enumerate(iterations):
         m = it.get("metrics", {})
         errors = "; ".join(it.get("errors", [])) or "-"
-        marker = " **<- SUBMITTED (accepted best)**" if row_index == best_row else ""
+        # The accepted best is the CODE STATE that ships, not the submitted
+        # artifact itself: the artifact is a 10-seed rank-average of that code
+        # state (see "Final submission" below), which scores higher than any
+        # single checkpoint here. Labelling this row "submitted" would name a
+        # 0.6045 checkpoint as the 0.6053 deliverable.
+        marker = " **<- accepted best (the code state that ships)**" if row_index == best_row else ""
         if row_index != best_row and isinstance(m.get("primary"), (int, float)) and best_row is not None:
             best_primary = iterations[best_row].get("metrics", {}).get("primary")
             if isinstance(best_primary, (int, float)) and m["primary"] > best_primary:
