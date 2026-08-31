@@ -9,6 +9,9 @@ this file's contents across iterations to explain what changed.
 """
 from __future__ import annotations
 
+from functools import lru_cache
+from pathlib import Path
+
 import pandas as pd
 
 from pipeline.data.leakage_guard import drop_leaky_columns
@@ -33,6 +36,21 @@ AUXILIARY_LABEL_COLUMNS = [
     "is_forward",
     "is_hate",
 ]
+
+
+@lru_cache(maxsize=1)
+def load_video_basic_features() -> pd.DataFrame | None:
+    """`video_features_basic_pure.csv` (video_id -> author_id): static
+    attributes fixed at upload time, so not leaky — unlike the statistic file
+    (see leakage_guard.py). author_id is the one item-side field the official
+    baseline uses. Cached: it is read once per process, not once per call."""
+    from pipeline.data.loader import load_config
+
+    cfg = load_config()
+    path = Path(cfg["dataset"]["raw_dir"]) / cfg["dataset"]["features"]["video_basic"]
+    if not path.exists():
+        return None
+    return pd.read_csv(path, usecols=["video_id", "author_id"])
 
 
 def build_features(
@@ -60,7 +78,16 @@ def build_features(
     """
     out = df.copy()
 
-    if video_features_basic is not None:
+    # Auto-load the static video-side table when the caller didn't pass one, so
+    # every path builds IDENTICAL features. Training passed it explicitly while
+    # pipeline/submit.py and the referee probe did not, which silently turned
+    # author_id into UNK at scoring time — a train/serve skew that degrades the
+    # submission without failing any check. One code path removes that class of
+    # bug entirely. Pass an empty DataFrame to opt out.
+    if video_features_basic is None:
+        video_features_basic = load_video_basic_features()
+
+    if video_features_basic is not None and not video_features_basic.empty:
         out = out.merge(video_features_basic, on="video_id", how="left")
 
     if video_features_statistic is not None:
