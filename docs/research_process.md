@@ -429,9 +429,11 @@ label-revealing oracle against those simulated labels.
 | label ORACLE vs simulated labels | 0.8471 |
 | **irreducible gap from pure coin-flip noise** | **0.2556** |
 | | |
-| our model vs real labels | 0.6053 |
+| our model vs real labels | 0.6053* |
 | oracle vs real labels | 0.8484 |
 | **observed gap** | **0.2431** |
+
+\* Run against the superseded full-validation-early-stop ensemble (see `superseded_artifact_sha256` in `FROZEN_CONFIG.json`). The shipped artifact scores 0.6049. The 0.0004 difference does not move the 0.2431-vs-0.2556 comparison this section rests on, so the analysis was not re-run.
 
 **The observed gap is smaller than the gap a perfect model faces in a world
 with nothing left to learn.** The oracle sees each impression's realised label;
@@ -448,7 +450,7 @@ probabilistic-model ceiling, so the size of the gap to it is not evidence for
 remaining headroom.** Anyone arguing from "0.8645 minus 0.605 is huge" has to
 make the case some other way.
 
-Scale note: 0.4753 / 0.5946 / 0.8645 are TEST-set figures; 0.6053 is a
+Scale note: 0.4753 / 0.5946 / 0.8645 are TEST-set figures; 0.6053 (above) is a
 VALIDATION figure. Mixing them inflates the apparent progress. On the
 validation scale (random 0.4841, oracle 0.8484, both measured here) the
 baseline captures 32.3% of the attainable range and this model 33.3% — about
