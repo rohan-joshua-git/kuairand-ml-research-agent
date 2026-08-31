@@ -152,10 +152,35 @@ of single signals, on a 4,000-user validation sample (0.5 = no signal):
 | `duration_ms` | 0.4865 |
 | `hourmin` | 0.4867 |
 | **user x author affinity** (train-derived) | **0.4981 — none** |
+| author AGGREGATE quality (train-derived) | **0.6439 — strong** |
+| music_id AGGREGATE quality (train-derived) | **0.6413 — strong** |
+| tag aggregate quality | 0.5690 |
+| upload_type / video_type aggregate quality | 0.5194 / 0.5023 |
+| video freshness (impression date - upload_dt) | 0.5120 |
 | **user x video affinity** (train-derived) | **0.4970 — none** |
 
 For scale, the whole official FM reaches valid GAUC 0.6674. A single scalar
 item-quality prior gets to 0.6453 of that on its own.
+
+**Do not confuse two different hypotheses about the same field.** "user x
+author affinity is dead" (0.4981) does NOT mean "author is useless": author
+AGGREGATE quality scores 0.6439, nearly as strong as the video prior. The
+first asks whether matching an author to a user helps; the second asks whether
+some authors are simply better. Only the first is dead. The same holds for
+music_id (0.6413) and tag (0.5690), neither of which is currently in the model
+— and note the organizer's flat feature ablation tested music_id as a raw ID
+embedding, not as a smoothed target encoding, which is a much stronger
+encoding for a high-cardinality field.
+
+**Ranking-invariance trap when designing candidate-relative features.** Within
+one user's candidate set, rank(f) is a monotone transform of f, so a model
+ranking on rank(age) produces an ORDERING IDENTICAL to one ranking on age. A
+candidate-relative version of a single feature adds nothing by itself. Its
+value is putting features on a comparable scale ACROSS candidate sets for a
+global model, and enabling interactions — so encode several features'
+ranks/z-scores jointly, never one alone. The same trap applies to calibration:
+a global monotone recalibration cannot change GAUC or nDCG at all; only
+group-wise calibration can, and only for users whose candidates span groups.
 
 **Consequences:**
 1. **Behavioural-history / sequence modelling (organizer priority 2) is very
