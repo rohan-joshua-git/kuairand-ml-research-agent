@@ -1,319 +1,204 @@
-# Autonomous ML Research Agent - KuaiRand-Pure
+# Autonomous ML Research Agent — KuaiRand-Pure
 
-An LLM agent that runs the ML engineering loop (read the problem, inspect data, engineer features, train, tune, evaluate, reflect, revise) on the KuaiRand-Pure recommendation dataset, aiming to beat the official FM baseline on GAUC and nDCG@5 without a human in the iteration loop.
+An LLM agent that runs the ML engineering loop — read the problem, inspect data, engineer features, train, tune, evaluate, reflect, revise — on the KuaiRand-Pure within-user ranking benchmark, without a human in the iteration loop.
 
-Status tags used below: **Implemented** (exists in this repo, verifiable by the file cited next to it), **Placeholder** (a working stand-in, not the final version), **Planned** (designed or partially built, not yet wired into the live loop).
+## Result
 
-## Overview
+**Validation primary 0.6053** against the official FM baseline's **0.6016**.
 
-Recommendation models like the one behind a short-video feed are built by repeatedly testing changes against held-out data. A common failure mode when automating this loop: the training data itself is biased, since it only contains items a prior recommender already chose to show users. An agent optimizing against that data can learn to exploit the bias instead of genuinely improving, and then underperform on unseen data.
+| Validation metric | Official baseline | This submission | Absolute delta |
+|---|---|---|---|
+| GAUC | 0.6674 | **0.6724** | **+0.0050** |
+| nDCG@5 | 0.5357 | **0.5382** | **+0.0025** |
+| primary | 0.6016 | **0.6053** | **+0.0037** |
 
-Three things in this build address that:
+Scored by the organizer's own `starter_kit/evaluate.py` via `submit.py --score`, not by our code. Final model: DeepFM-lite, 10-seed rank-average, seeds 0–9.
 
-- **Unbiased referee.** KuaiRand-Pure includes a slice of interactions collected under uniformly random exposure instead of the production recommender. The agent scores candidates against this random-exposure log as well as the standard validation split, and flags divergence between the two. The organizer Starter Kit (`starter_kit/README.md`) independently confirms this log's sanctioned use as exactly this: extra validation, never training.
-- **Compression gate.** Before a checkpoint is finalized, the agent summarizes the approach and hands the summary to a fresh LLM context with no access to validation scores. If that second pass can't reproduce the result from the summary alone, the checkpoint is rejected.
-- **Pre-seeded domain knowledge.** The agent starts with a tiered knowledge base about the dataset — including two undocumented data quirks found by reading the raw field spec and file manifest, and the organizer's own already-run feature-ablation findings (details below) — instead of rediscovering all of it through trial and error.
+**No hidden-test score is claimed anywhere in this repository.** The hidden test is scored once by the organizer. The baseline's published test primary (0.5946) appears only as the organizer's reference figure and is never compared against a validation number — they are different splits on different scales.
 
-## Current state
+| Resource | Value |
+|---|---|
+| Iterations | 9 of a 50 cap |
+| Wall-clock | 0.1965 h of a 6 h ceiling |
+| LLM tokens | 91,430 |
+| GPU-hours | 0 (CPU-only) |
+| Manual interventions | 2, both logged with reasoning in `logs/interventions.jsonl` |
 
-The organizer's KuaiRand-Pure Starter Kit (vendored verbatim in [`starter_kit/`](starter_kit/)) is now in the repo, along with the real dataset (downloaded via the working Zenodo link — see [Setup](#setup)). Every value that was previously a placeholder pending the Starter Kit — metrics, label, official baseline, convergence rule, submission schema — is now confirmed and wired in.
+Full provenance, including artifact SHA-256s, is in [`docs/results_table.md`](docs/results_table.md) and `submissions/FROZEN_CONFIG.json`.
 
-| Piece | Status | Note |
-|---|---|---|
-| Official baseline reproduction | Implemented | `pipeline/official_baseline.py` runs the vendored FM baseline directly; verified locally to reproduce the published test primary (0.5946) within the 0.0008 seed std — see [Task Requirement #1](#reproducing-the-official-baseline). |
-| End-to-end loop | Implemented | Scores through the vendored `starter_kit/evaluate.py` (GAUC/nDCG@5), not a reimplementation — see [Architecture](#architecture). Run live against the Gemini backend; every scored run happens in a fresh subprocess (`pipeline/train_runner.py`) so the code being measured is exactly what the last patch wrote. |
-| Self-editing code | Implemented | Real API calls with automatic rollback on a failed smoke test — proven both for a syntactically broken patch and for one that imports cleanly then crashes at run time (`scripts/test_code_editor.py`). `EDITABLE_FILES` allows `features.py`, `label.py`, `train.py`, `model/baseline.py` and `ablation.py`; note the hypothesis router (`route_target_file`) currently only ever selects the first three, so the last two are reachable config rather than surface the agent actually edits today. |
-| Unbiased referee | Implemented | Wired into every scored iteration: the trained model scores a validation-window slice of the random-exposure log, and the biased-vs-unbiased divergence is logged per iteration with an alert threshold. |
-| Final submission | Implemented | `pipeline/make_submission.py` is the only place `allow_test=True` is set. Supports `--ensemble-seeds N`, which rank-averages N seeds (rank, not score — only within-user order is scored). Measured: 1 seed 0.6017, 5 seeds 0.6028. |
-| Submission writer | Implemented | `pipeline/submit.py` writes the confirmed `row_id,user_id,video_id,score` schema via the vendored `starter_kit/submit.py`, with row-order alignment cross-checked against `pipeline/data/loader.py`. Verified end-to-end (write + official `--check`/`--score` validation) against real data. |
+## What this project actually is
 
-## Results (measured, not projected)
+The score moved +0.0037. The interesting part is not that number — it is that **every alternative explanation for it was tested and eliminated**, and that several apparently promising signals were killed by controls rather than accepted.
 
-**Submitted result: validation primary 0.6044 vs the official baseline's
-0.6016 — a delta of +0.0028, with both metrics up** (GAUC 0.6674 -> 0.6710,
-nDCG@5 0.5357 -> 0.5379). Scored by the organizer's own
-`starter_kit/submit.py --score`, not by our code.
+The methodology is the contribution:
 
-**The agent produced the largest single improvement, autonomously.** Its
-DeepFM-lite hypothesis (a parallel [32, 16] MLP branch alongside the FM's
-linear and pairwise terms) scored 0.6045, cleared ε=0.002 against its own
-best, passed the compression gate, and was checkpointed. It proposed this
-*after* its larger DeepFM patch crashed the smoke test and was rolled back
-automatically.
-
-We still separate human from agent contributions below, because the autonomy
-criterion is scored on what the agent did rather than on the final number.
-
-| Step | Valid primary | Author |
-|---|---|---|
-| Official FM baseline (published) | 0.6016 | organizer |
-| Our editable pipeline, torch FM over the official 5 fields | 0.6017 | human |
-| + `pos_bucket` session-position feature | 0.6024 | human |
-| **\+ agent's DeepFM-lite MLP branch (accepted, gate-passed)** | **0.6045** | **agent** |
-| + 5-seed rank-averaged ensemble (submitted) | **0.6044** | human |
-
-The ensemble is **neutral on the agent's architecture** (0.6044 against a
-single-seed range of 0.6040–0.6047) even though it was worth +0.0012 on the
-plain FM (0.6024 -> 0.6036). We kept it for variance reduction on unseen data,
-not because it measured better here — reporting it as a win would be
-overclaiming.
-
-Run 1 (from a weaker starting pipeline) and run 2 both converged without an
-accepted improvement; run 3 is the one that found the MLP branch. All three
-trajectories are in `logs/`, not just the successful one.
-
-
-Run of 2026-08-31, Gemini backend, scored by the vendored
-`starter_kit/evaluate.py` on the validation split:
-
-| Iteration | Change | GAUC | nDCG@5 | Primary | vs prev best |
-|---|---|---|---|---|---|
-| 0 | Official FM baseline, reproduced via `starter_kit/baseline.py` | 0.6671 | 0.5358 | 0.6015 | — |
-| 0 | **Our starting pipeline (torch FM, human-authored)** | **0.6676** | **0.5358** | **0.6017** | — |
-| 1 | Agent: per-user pairwise BPR loss | 0.6646 | 0.5341 | 0.5994 | −0.0024 |
-| 2 | Agent: multi-task auxiliary `is_click` head (weight 0.2) | 0.6670 | 0.5356 | 0.6013 | −0.0004 |
-| 3 | Agent: listwise ListNet cross-entropy loss | 0.6655 | 0.5353 | 0.6004 | −0.0013 |
-
-Every non-improving patch was rolled back automatically, so the working tree
-always holds the best-known state — which is what the submission step
-re-trains from. Note iteration 6 scored 0.6050, *higher* than the submitted
-0.6045 checkpoint, but only +0.0005 over the accepted best: below ε, so it was
-rejected and rolled back. The results table flags it explicitly rather than
-quietly reporting the higher number.
-
-Reproduce the submission with:
-
-```bash
-python -m pipeline.make_submission --out-dir submissions --ensemble-seeds 5
+```
+strong baseline
+      ↓
+observe an unexplained signal
+      ↓
+form a mechanism hypothesis
+      ↓
+build a control that would expose a false positive
+      ↓
+measure
+      ↓
+result survives? → keep     result dies? → record why, close it
+      ↓
+repeat
 ```
 
-Cost: 38,361 tokens, 0.118 wall-clock hours, 0 GPU-hours (CPU-only).
-**Manual interventions: 1** — see [Autonomy accounting](#autonomy-accounting).
+The final model was not selected because it won a validation sweep. It survived systematic attempts to falsify it.
 
-### What the agent got right, and what it cost us
+### The research record
 
-The agent independently proposed **switching the loss to a ranking objective
-on its first iteration, in three separate runs** — which is the organizer's
-own #1-ranked lead in `starter_kit/README.md`. It then progressed pointwise ->
-pairwise -> listwise across iterations, reading its own failure history rather
-than repeating itself. The search behaviour is sound.
+| Hypothesis | Test | Result | Decision |
+|---|---|---|---|
+| `user_id` helps via affinity or capacity | row-level shuffle holding parameters fixed | identity **108%**, capacity **−8%** | closed — capacity refuted |
+| The user embedding overfits, so shrink it | field-specific weight decay, 6 arms × 3 seeds | monotone **negative** over 5 orders of magnitude | closed |
+| Performance decays across the eval window | frozen model-free reference on the same days | gap **+0.0008** — decline is day difficulty | closed |
+| The 0.8645 gap means signal is missing | simulate `y ~ Bernoulli(q)` from the calibrated model | irreducible gap **0.2556** > observed **0.2431** | closed |
+| Users differ in feature *sensitivity* | 4-arm OOF + permuted + randomized controls | **−0.0012**, CI excludes zero | closed |
+| Staleness explains that failure | early vs late estimation, sample sizes matched | **+0.00017**, CI includes zero | refuted |
+| DeepFM/GBDT disagreement is exploitable | per-group oracle + quality-matched control | **+0.0023** of an apparent +0.0314 | closed |
 
-The finding is that the lead did not pay off here. Pairwise BPR, a listwise
-ListNet objective, and a multi-task auxiliary head all landed 0.0004–0.0024
-*below* pointwise logloss on this data. Three independent implementations
-moving the same direction is weak evidence that the ceiling on this dataset is
-not objective misalignment.
+Detail for each is in [`docs/research_process.md`](docs/research_process.md); the last two live on the research branches (`research/user-sensitivity` @ `9e971bf`, `research/conditional-blend` @ `b5ae63d`), which were deliberately not merged so the frozen artifact could not be disturbed.
 
-Two things we checked so we would not misattribute the plateau:
-- **Not undertraining.** Raising the epoch cap from 12 to 40 with patience 4
-  early-stops at 13 epochs and returns the identical 0.6017.
-- **Not the known dead ends.** Adding features and growing embedding capacity
-  were already measured flat by the organizer
-  (`starter_kit/ablation_features.py`), which is why they are Tier-1 knowledge
-  the agent is told not to re-test.
+### Three findings worth reading
 
-### Autonomy accounting
+**1. `user_id` encodes identity, not capacity.** Deleting `user_id` costs −0.0091, yet user×video affinity measures at chance three times over. The mechanism was undetermined until a control that permutes the row-to-user link *while holding parameter count, MLP input width and code-frequency distribution fixed* lost the entire effect: identity +0.0093 (108%), capacity −0.0007 (−8%). The permutation has to be row-level — a bijective user→row remap is a symmetry of the model and trains to an identical result, which would have produced a convincing false null.
 
-- **Manual interventions: 1.** Mid-run we changed `agent/llm_client.py`'s
-  failover policy (a daily-quota 429 now fails over immediately instead of
-  walking a 15/30/60/120s backoff ladder) and relaunched. That is a change to
-  the agent's *behaviour*, so it counts. Recorded with its reasoning in
-  `logs/interventions.jsonl`.
-- **Process restarts after a crash: not counted, and here is why.** In the
-  Track 2 workshop Q&A (2026-08-31) the organizer was asked directly and
-  answered that restarting a crashed process is not a manual intervention —
-  "we only consider the manual intervention if you change the agent's
-  behaviour" — and suggested a second session do the restarting.
-  `agent/supervisor.py` is that, automated: it re-executes an identical
-  command and touches no code, config, or checkpoint selection, while the
-  orchestrator resumes from `agent/checkpoint.py` with its wall-clock budget
-  already charged. Restarts are logged separately in `logs/restarts.jsonl`.
+**2. The published ceiling is not reachable by any model.** 0.8645 is the organizer's **label-oracle** ceiling and is correctly computed. But simulating a world where the model *is* the true conditional probability — so nothing remains to learn by construction — an oracle still beats it by **0.2556**, while the real observed gap is **0.2431**, smaller. A long_view is a coin flip; an oracle that sees the realised label wins by that margin no matter how good the model is. So the distance to 0.8645 is not evidence of remaining headroom.
 
-### Known weakness in our own instrumentation
+**3. A per-group oracle is upward-biased, and here the bias was 12× the signal.** A per-user oracle over DeepFM and GBDT showed +0.0314 of apparent headroom. A quality-matched control — DeepFM degraded with calibrated noise to the GBDT's exact score level, containing no information DeepFM lacks — reproduced **+0.0291** of it. Real excess: **+0.0023**. Picking the luckier of two noisy per-user estimates on a median of 4 impressions manufactures most of an "upper bound".
 
-The unbiased-referee divergence alert fired on **every** iteration (+0.19 to
-+0.24 against a 0.05 threshold) and therefore carried no information. The
-random-exposure probe has a structurally different label distribution than the
-biased split (probe primary ~0.36 vs biased ~0.60), so the absolute gap is
-large by construction. The informative signal is the *change* in divergence
-across iterations, not its level; the threshold should be set on that instead.
-We are reporting this rather than presenting the referee as having caught
-something.
+### A leak we introduced, found, and fixed
 
-## Architecture
+The first user-sensitivity experiment produced a clean, significant result: real sensitivities scored **−0.0048** with a CI excluding zero, while permuted and randomized versions of the identical fields were neutral (+0.0003, −0.0002).
+
+Noise being free while real values did damage is not how a failed hypothesis behaves — it is how a leak behaves. The per-user statistic had been computed from that user's own training labels, so a training row's feature contained that row's label: an in-fold target encoding one level above where we had applied the out-of-fold rule. Rebuilding it so each row's band comes from that user's *other* folds recovered 75% of the drop.
+
+**With only a control and a treatment arm this would have been recorded as "sensitivities are harmful."** The two null controls are what made it diagnosable. This is why every user-derived feature here ships with both a permuted and a randomized control.
+
+### Measured vs interpreted
+
+Kept separate deliberately.
+
+**Measured:** sensitivities have split-half reliability 0.31–0.60 (Spearman-Brown 0.47–0.75), so they are not noise. They lose 22–61% of their correlation across ~1 week, against a matched-size random split. Exposing them costs −0.0012. Both null controls are neutral. Estimating from 6× more data makes the harm *worse*, not better.
+
+**Interpretation, not established:** harm scales with how much the model trusts the band — the user embedding already learns this modulation from the same data, and an explicit precomputed summary adds a redundant, coarser pathway that generalises worse.
+
+## How results are protected from ourselves
+
+**Selection/confirmation split.** ~30 configurations had been compared against the whole validation split, so the winner's curse was unbounded. [`pipeline/eval_protocol.py`](pipeline/eval_protocol.py) partitions validation by user hash into 11,270 selection and 11,107 confirmation users. All exploration and early stopping use selection only. The confirmation half was looked at **once**, after the config was frozen.
+
+Its per-user decomposition of GAUC/nDCG@5 is verified against `starter_kit/evaluate.py` to **1.6e-14**, including a tie-heavy case, which is what makes the user-level bootstrap exact rather than approximate.
+
+**Confirmation result.** Raw confirmation (0.6023) sits below selection (0.6083) — but a frozen model-free video prior drops by nearly the same amount (+0.0053 against the model's +0.0059), so that gap is population difficulty, not overfitting. The model's advantage over that reference is **+0.0250 on selection and +0.0242 on confirmation**: the learned advantage transfers to users never used for any decision.
+
+**Why the submission is an ensemble.** The mean gain is **not** established — 5-seed vs 1-seed is +0.00027, while same-model negative controls reach 0.00077. It ships for **variance**, which is established: single-seed std 0.00049 over 20 seeds against 5-seed std 0.00020, matching √n. On a one-shot submission the floor is what matters — worst single seed 0.6036, worst 5-seed ensemble 0.6046.
+
+**Reproducibility.** The reported 0.6053 was produced twice by independent paths — cached score matrix → `eval_protocol` decomposition, and `make_submission` → `aligned_rows`/`score_rows` → CSV → `starter_kit/evaluate.py`. They agree to four decimals on all three metrics, which establishes the reported number is the number the submitted artifact actually scores.
+
+## Agent design
 
 ```
                     orchestrator.py loop
-        read -> inspect -> engineer -> train -> evaluate -> reflect/revise -> ...
+     read -> inspect -> engineer -> train -> evaluate -> reflect/revise -> ...
 
-        Skill store              Ablation                Referee + gate
-        (warm start)              (targeted search)        (unbiased scoring,
-        tier1/2/3                 which block moves         overfit rejection)
-                                   the score?
+     Skill store            Ablation              Referee + gate
+     (warm start)           (targeted search)     (unbiased scoring,
+     tier1/2/3              which block moves      overfit warning)
+                            the score?
 ```
 
-**Ablation-first refinement.** Instead of rewriting the whole pipeline each round, `agent/ablation.py` runs a cheap ablation over pipeline blocks (training schedule, learning rate, and whatever new blocks the agent introduces — pairwise loss, sequence features, multi-task heads) to find which one is moving the score, and `agent/orchestrator.py` targets that block for the next LLM-driven code change. `agent/skill_store/` holds domain knowledge in three tiers: Tier 1 (always loaded, dataset-specific quirks + the organizer's own already-run findings), Tier 2 (RecSys method priors, loaded when relevant), Tier 3 (deep dives, loaded on demand via keyword match in `agent/skill_store/retriever.py`). This follows results from MLE-STAR and HASTE showing ablation-guided, tiered-knowledge search outperforms flat knowledge-dumping and whole-pipeline rewrites.
+**Ablation-first refinement.** Rather than rewriting the pipeline each round, `agent/ablation.py` runs a cheap ablation over named blocks to find which is moving the score, and the orchestrator targets that block for the next LLM code change. `agent/skill_store/` holds domain knowledge in three tiers, loaded on demand — following MLE-STAR and HASTE, where tiered retrieval beat flat knowledge-dumping.
 
-**Official baseline reproduction.** Every orchestrator run starts by training the organizer's own vendored FM baseline (`pipeline/official_baseline.py`, calling `starter_kit/baseline.py` directly rather than reimplementing it) and confirming it lands within tolerance of the published validation score (0.6016) before any LLM-driven iteration begins — Task Requirement #1. The test-split number is computed too (the vendored function returns both) but is logged for evidence only and never surfaced to the reflect/iterate prompts, since the agent's decisions must never be informed by hidden-test scores.
+**Bounded blast radius.** LLM rewrites can only land in five allowlisted files (`EDITABLE_FILES`), behind a subprocess smoke test that rolls back on failure and records the reason as a pitfall for the next prompt. Every scored run trains in a fresh interpreter (`pipeline/train_runner.py`), so a stale import can never score the previous iteration's code.
 
-**Faithful scoring.** `pipeline/evaluate.py` doesn't reimplement GAUC/nDCG@5 — it imports and calls `starter_kit/evaluate.py` directly, so there's no risk of a validation-time number quietly diverging from what the organizer's script would actually report on the hidden test set.
+**Faithful scoring.** `pipeline/evaluate.py` imports and calls `starter_kit/evaluate.py` rather than reimplementing GAUC/nDCG@5, so a validation number cannot quietly diverge from what the organizer's script reports.
 
-**Unbiased referee.** `log_random_4_22_to_5_08_pure.csv` contains ~1.19M interactions from uniformly random exposure, undocumented in the challenge brief but since confirmed by the Starter Kit README as a sanctioned extra-validation-only signal. `agent/referee.py` scores candidates against this log alongside standard validation and tracks the gap between the two; a widening gap signals the agent is fitting the biased proxy rather than improving generally.
+**Unbiased referee.** `agent/referee.py` scores candidates against the uniformly-random-exposure log alongside standard validation and tracks the divergence. The probe is restricted to the **validation window** — 75.7% of that file falls inside the hidden-test window, and while it never drove checkpoint selection, its divergence is surfaced to the reflect step, so the test-window rows are kept out of the loop entirely.
 
-**Compression gate.** `agent/compression_gate.py` compresses a winning approach into a short summary and hands it to a fresh LLM context with no memory of the search and no access to validation scores. If that reproducer can't get behind the approach, the checkpoint is rejected and the previous best is kept. This targets a known failure mode where agents pick a validation-overfit artifact over a genuinely weaker-looking but real solution.
+**Compression gate, advisory.** `agent/compression_gate.py` hands a terse summary of a winning approach to a fresh LLM context with no access to validation scores. It does **not** veto: FAQ 2.9.1(c) requires the validation-best checkpoint to ship, so a failed gate is logged as a pitfall and fed to the next reflect step.
 
 ## Dataset findings
 
-Findings 1-2 came from reading the raw KuaiRand-Pure field spec and file manifest, before the Starter Kit was available. Findings 3-4 came from cross-checking that reading against the real, vendored Starter Kit and real data once both arrived.
-
-1. **`is_click` means two different things.** In the two-column UI it's a genuine tap. In the single-column UI it's actually `valid_play`: `play_time_ms >= duration_ms` for videos under 7 seconds, or `play_time_ms > 7000ms` for longer ones, keyed on the `tab` field. `pipeline/data/label.py` resolves this explicitly (`profile_label`, `resolve_auxiliary_click_label`) instead of training on a conflated signal — relevant only to the multi-task auxiliary head, since the primary label is `long_view`, not `is_click` (see below). On real data the derivation holds ~97.2% of the time, not exactly 1.0.
-2. **`video_features_statistic` columns leak**, and on real data they do **not** follow a `_statistic` naming convention. The actual header (`show_cnt`, `play_cnt`, `like_cnt`, `follow_cnt`, ...) doesn't self-identify at all — a pure substring check would silently let every one of them through. `pipeline/data/leakage_guard.py` now flags them by an exact name list built from the real file's header, with the substring check kept only as a fallback for naming conventions that do self-identify. Re-enabling one requires an explicit, logged opt-in.
-3. **`play_time_ms` is the label in disguise, not a feature.** The primary label is `long_view` (confirmed by the Starter Kit), and on real data a bare threshold on `play_time_ms/duration_ms` predicts it at 84.7% accuracy (corr=0.64) — matching why the official baseline's own field list uses `duration_ms` (video length) but never `play_time_ms` (watch time, i.e. the outcome). `pipeline/data/features.py` excludes it from `NUMERIC_SIGNAL_COLUMNS` for this reason; an earlier version of this pipeline (built before the Starter Kit confirmed `long_view` as the label) had this backwards.
-4. **The organizer already ran the "add more features" and "grow model capacity" experiments** (`starter_kit/ablation_features.py`) and found both flat (~0 gain, sometimes slightly negative) — because ranking is within-user, so anything constant within a user (most user-side features) can't move that user's order. This is now Tier-1 knowledge (`agent/skill_store/tier1_core.md`) specifically so the agent doesn't re-spend early iterations rediscovering it.
-
-5. **`upload_dt` has three distinct values.** Every one of the 7,583 videos was uploaded on 2022-04-09, -10 or -11. There is no video lifecycle in this dataset, which structurally rules out the entire temporal-dynamics family — freshness/decay curves, momentum, rolling and EWMA statistics, HAR, GARCH, Hawkes/self-exciting processes, Kalman/state-space filters, change-point detection and ARIMA-family forecasting. Confirmed independently: exponentially recency-weighting the video-quality prior over the 13 training days is flat (0.6389 vs 0.6387 uniform) and a 2-day half-life actively hurts (0.6342).
-6. **`author_id` and `music_id` are the video prior in disguise.** 87% of authors and 98% of music_ids own exactly one video. Target-encoded, `corr(video_te, author_te) = 0.985` and `corr(video_te, music_te) = 0.987`, so their strong-looking standalone scores (0.6367 / 0.6365) carry nothing the `video_id` embedding lacks. Only `tag` is a genuine pooling level (110 values, median 10 videos each, corr 0.458 with the video prior). This finding corrected one of our own top-ranked experiment recommendations, which had been made from a marginal score without checking entity granularity.
-7. **`tab` is a reordering signal that exists for only 40% of users.** It is the one context with substantial conditional signal (+0.0172 over the video-quality bucket), but 60% of validation users see a single tab, and for them it contributes **+0.0001** — a within-user-constant feature cannot reorder anything. Within any single tab the long_view rate is almost perfectly monotone in quality (corr +0.989 / +0.993 / +0.990), so `tab` never re-ranks inside itself; its entire effect is the level gap *between* tabs, which run from 0.004 (tab 3) to 0.489 (tab 4).
-8. **The benchmark's signal decomposes into roughly equal thirds.** Video quality alone reaches primary 0.5807; adding `tab` reaches 0.5877; a GBDT over all clean features reaches 0.5961; the neural model reaches 0.6048. This refutes the tempting summary that ranking is essentially *f(video quality, tab)* — a third of the signal is captured only by learned structure that no named feature reproduces. See `docs/research_process.md` for the full derivation and for what remains unexplained.
-
-## Research record
-
-**Headline result of the extended investigation: no change.** Validation primary
-remains 0.6047. Roughly 95 method families were triaged, six substantive
-hypotheses were tested at three or more seeds, and one candidate (dropping the
-FM pairwise term) passed an 8-seed paired test at t = 4.49 before being
-**rejected** by a user-level bootstrap whose CI included zero, a temporal
-split-half showing the effect decaying 5x toward the test window, and a negative
-control in which two seed groups of the *same* model differed by the same
-magnitude as the "effect". That near-miss is documented in full, because a tight
-paired interval is not evidence of generalisation.
-
-
-`docs/research_process.md` is the full account of this investigation: every hypothesis considered, what was dropped and on what evidence, the measured result of each experiment, and the reasoning connecting them. It also records our own process failures and the two occasions where a headline hypothesis of ours was refuted by measurement.
-
-It uses an explicit status vocabulary, because "tested and found nothing" and "the dataset cannot express this" are very different claims: `SUPPORTED`, `WEAK`, `NULL`, `REJECTED_STRUCTURALLY`, `NOT_IDENTIFIABLE`, `NOT_APPLICABLE`. Roughly 90 method families were triaged; the majority are `REJECTED_STRUCTURALLY`, which is a statement about this benchmark, not about the methods.
-
-`docs/backlog_triage.md` maps a specific ~95-item method backlog onto that evidence, item by item.
+1. **`is_click` means two different things.** A genuine tap in the two-column UI; `valid_play` in the single-column UI, keyed on `tab`. `pipeline/data/label.py` resolves this explicitly. Relevant only to the auxiliary head — the primary label is `long_view`.
+2. **`video_features_statistic` columns leak** and do *not* self-identify by name (`show_cnt`, `play_cnt`, …), so a substring check would let all of them through. `pipeline/data/leakage_guard.py` flags them by exact name.
+3. **`play_time_ms` is the label in disguise** — corr 0.64 with `long_view`, 84.7% threshold accuracy. Excluded as an input; it is an outcome of the impression being predicted.
+4. **The organizer already ran "add more features" and "grow capacity"** and found both flat. Pre-seeded as Tier-1 knowledge so the agent doesn't re-spend iterations on it.
+5. **`upload_dt` has three distinct values.** No video lifecycle exists, which structurally rules out the entire temporal-dynamics family. Confirmed independently: recency-weighting is flat and a 2-day half-life hurts.
+6. **`author_id` and `music_id` are the video prior in disguise** — 87% and 98% own exactly one video, target-encoded corr 0.985 / 0.987. Only `tag` is a genuine pooling level. This corrected one of our own top-ranked recommendations.
+7. **`tab` is a reordering signal for only 40% of users.** For the 60% inside a single tab it contributes +0.0001 — a within-user constant cannot reorder anything. Its entire effect is the level gap *between* tabs (0.004 to 0.489).
+8. **The signal decomposes into roughly equal thirds.** Quality 0.5807 → +tab 0.5877 → GBDT over clean features 0.5961 → neural 0.6048. A third is captured only by learned structure no named feature reproduces.
+9. **17.5% of the metric is structurally unmovable.** 3,917 validation users have one impression: model, prior and oracle all score identically, and GAUC excludes them entirely.
 
 ## File map
 
 ```
-starter_kit/               organizer-provided Starter Kit, vendored verbatim (evaluate.py: do not modify)
-  evaluate.py                 GAUC / nDCG@5, the actual scoring contract
-  data.py                      official split + 5-field encoding
-  baseline.py                   the official FM baseline (and pop/random references)
-  baseline_scores.json           published numbers, seed std, convergence params
-  submit.py                       official submission writer/validator
-  ablation_features.py             organizer's own "does more features help" experiment (they don't)
-  KuaiRand-Pure/data/               real dataset (downloaded, gitignored — see Setup)
-
-pipeline/                 the RecSys ML pipeline; what the agent edits
-  data/
-    download.py            dataset fetch (--fetch, working direct URL) / verification (--check)
-    loader.py               date-pinned train/val/test split (test is guarded, never loaded unless explicitly allowed)
-    label.py                 primary label (long_view) + auxiliary is_click resolution
-    leakage_guard.py          drops video_features_statistic by exact real-column-name list
-    features.py                feature engineering, the agent's main edit surface
-  model/
-    baseline.py               the agent's OWN editable model (small embedding+MLP), not the organizer baseline
-    architectures/             where agent-proposed model variants would land
-  official_baseline.py         reproduces the organizer's FM baseline via starter_kit/, for Task Requirement #1
-  train.py                     training entrypoint (used by orchestrator + smoke tests)
-  evaluate.py                  GAUC / nDCG@5, delegated to starter_kit/evaluate.py (not reimplemented)
-  smoke_test.py                fast sanity check before a patch is trusted
-  submit.py                    final submission writer, matches the official row_id,user_id,video_id,score schema
-
-agent/                    the autonomous agent
-  llm_client.py             Anthropic API wrapper + token accounting
-  orchestrator.py            main loop; reproduces the official baseline once, then iterates
-  ablation.py                 block-level ablation
-  code_editor.py               applies LLM-written patches with smoke-test rollback
-  referee.py                    unbiased scoring via the random-exposure log
-  compression_gate.py            overfit-rejection check before finalizing
-  pitfall_store.py                structured failure/recovery log (feeds Tier-1 context)
-  logger.py                        per-iteration run log, intervention counter, resource usage
-  report.py                         generates docs/results_table.md from run logs
-  skill_store/
-    tier1_core.md                    always loaded: task framing, convergence rule, dataset quirks,
-                                       organizer's already-tried findings, priority-ranked headroom list
-    tier2_domain.md                   RecSys method priors, loaded when relevant
-    tier3_deep/                        deep dives, loaded on demand
-    retriever.py                        tiered retrieval logic
-
-config/agent_config.yaml   all tunables, confirmed against the Starter Kit (see below)
-docs/                       research_process.md (full research record), backlog_triage.md,
-                            results_table.md (generated), devpost_writeup.md (draft)
-logs/                       generated at runtime: iterations.jsonl, interventions.jsonl, pitfalls.json, resource_usage.json
+agent/
+  orchestrator.py        the loop: ablation -> hypothesis -> patch -> smoke -> score -> checkpoint
+  code_editor.py         whole-file rewrites behind an allowlist, with rollback
+  eval_protocol.py       (in pipeline/) selection/confirmation split + exact bootstrap
+  referee.py             unbiased random-exposure probe, validation window only
+  compression_gate.py    advisory overfit check; never vetoes the validation-best
+  logger.py              iteration + intervention logs (graded evidence)
+  skill_store/           tier1 always-loaded findings; tier2/3 retrieved on demand
+pipeline/
+  train.py               model + training. AGENT-EDITABLE
+  data/features.py       feature surface. AGENT-EDITABLE
+  data/loader.py         official date split, allow_test guard
+  data/leakage_guard.py  drops the leaky statistic columns
+  evaluate.py            delegates to starter_kit/evaluate.py
+  eval_protocol.py       per-user metric decomposition, verified to 1.6e-14
+  submit.py              alignment-checked submission writing
+  make_submission.py     the ONLY place allow_test=True is set
+scripts/                 the experiments behind the research table
+docs/
+  research_process.md    full account: every hypothesis, control and disposition
+  backlog_triage.md      ~95-item method backlog mapped to evidence
+  results_table.md       generated by agent/report.py — never hand-edited
+starter_kit/             organizer code, vendored verbatim, never modified
 ```
 
 ## Setup
 
 ```bash
 pip install -r requirements.txt
-# The agent makes real API calls — there is no offline/mock mode. Set the key
-# for whichever provider config/agent_config.yaml selects (default: gemini).
-export GEMINI_API_KEY=your_key_here      # default provider, free tier
-# export ANTHROPIC_API_KEY=your_key_here # if agent.llm.provider is "anthropic"
+python -m pipeline.data.download          # fetch/verify KuaiRand-Pure
 
-python -m pipeline.data.download --fetch   # downloads + unpacks the real KuaiRand-Pure dataset (~47MB, no registration)
-python -m pipeline.data.download --check   # verifies everything required is present in ./data/raw
+# The agent makes real API calls; there is no offline mode. Set the key for
+# whichever provider config/agent_config.yaml selects (default: gemini).
+export GEMINI_API_KEY=your_key_here
+# export ANTHROPIC_API_KEY=...            # if agent.llm.provider is "anthropic"
 ```
 
-## Reproducing the official baseline
-
-Task Requirement #1 ("confirm the pipeline reaches the official baseline's reported validation score") is checked directly:
-
-```bash
-python -m pipeline.official_baseline
-```
-
-This trains the vendored `starter_kit/baseline.py` FM (k=16, lr=0.001) on real data and compares against `starter_kit/baseline_scores.json`. Verified locally: valid primary 0.6015 vs published 0.6016, test primary 0.5953 vs published 0.5946 (well within the published 0.0008 seed std).
-
-## Reproduction steps
+## Reproduction
 
 | Command | Purpose |
 |---|---|
-| `python -m pipeline.official_baseline` | Confirm the official baseline reproduces (Task Requirement #1) |
-| `python -m pipeline.train` | Sanity-check the agent's own editable pipeline (not the official baseline) |
-| `python -m agent.orchestrator` | Run the full autonomous agent loop — reproduces the baseline once, then iterates |
-| `python -m agent.report` | Generate `docs/results_table.md` and a resource-usage summary from the run log |
-| `python -m scripts.test_logic` / `python -m scripts.test_code_editor` | Regression tests for label/leakage/metric logic and the patch-rollback safety mechanism |
+| `python -m pipeline.official_baseline` | Task Requirement #1 — reproduce the baseline on validation |
+| `python -m pipeline.smoke_test` | Fast contract check (fingerprint `0.4498908751631786`) |
+| `python -m pipeline.train` | Train the champion once — expect val primary 0.6047 ± 0.0005 |
+| `python -m pipeline.eval_protocol` | Verify the metric decomposition against the official script |
+| `python -m agent.orchestrator` | The full autonomous loop |
+| `python -m agent.report` | Regenerate `docs/results_table.md` from the run log |
+| `python -m pipeline.make_submission --out-dir submissions --seed 0 --ensemble-seeds 10` | Regenerate the frozen submission |
 
-`config/agent_config.yaml` controls which Claude models run which role, iteration budget, convergence thresholds, and the referee mode toggle. Every value that previously depended on the organizer's Starter Kit is now confirmed and cited against `starter_kit/baseline_scores.json` / `starter_kit/README.md` directly in the config comments.
+Research scripts (`scripts/seed_ensemble.py`, `error_slices.py`, `sweep_user_wd.py`, `user_id_mechanism.py`, `temporal_curve.py`) reproduce the experiments in the table above.
 
-## Resolved (previously "Open questions")
+**On Windows, `starter_kit/submit.py --check` crashes on success** — its success line prints U+2713, which cp1252 cannot encode, so the traceback appears *after* every check has passed. Run it as `PYTHONIOENCODING=utf-8 python submit.py --check ...` and confirm exit 0.
 
-All of these were unknowns pending the Starter Kit; all are now confirmed and wired in.
+## Limitations, and what we'd do with more time
 
-1. `log_random_4_22_to_5_08_pure.csv` is confirmed sanctioned for extra validation only, never training (`referee.mode: tier_b`, the default and only sanctioned setting — `tier_a` is kept in code as a documented, non-default option).
-2. Candidate set: each user's impressed set within the eval split ("within-user ranking over logged impressions") — matches this pipeline's existing default.
-3. Convergence rule: ε=0.002, N=3, 50-iteration cap, 6h wall-clock ceiling — all wired into `config.starter_kit` and `agent/orchestrator.py`.
-4. Official baseline, eval script, and submission schema: all vendored in `starter_kit/` and wired into `pipeline/official_baseline.py`, `pipeline/evaluate.py`, `pipeline/submit.py` respectively.
-
-**Not resolved / out of scope:** whether the Zenodo supplementary files (video captions, category taxonomy) are usable — the official problem statement and Starter Kit never mention them, so they're treated as out of scope rather than pursued further.
-
-## Limitations
-
-- **New-file creation is out of scope for the editor.** `agent/code_editor.py` rewrites whole files at fixed paths, so the agent can change the loss, the model and its own ablation grid, but cannot add a new module under `pipeline/model/architectures/`. That needs a create-a-file flow the current backup/restore-one-path mechanism does not support.
-- **The agent's feature hypotheses have a narrow path into the model, and we
-  measured this the hard way.** Across two runs, four separate `features.py`
-  patches adding a video-quality prior all returned *bit-identical* scores
-  (0.6024 to four decimals). Different patches cannot produce identical
-  metrics unless the new column is never used — and it wasn't. Originally the
-  encoded field list lived in `train.py`, a different file, and a patch is one
-  whole-file rewrite, so the agent could not close the loop. We added an
-  `EXTRA_CATEGORICAL_FIELDS` registry in `features.py` (verified: the same
-  hypothesis then moves the score to 0.6027). A second constraint remains: the
-  FM consumes **categorical fields only**, so a continuous feature — like the
-  out-of-fold target encoding the agent later proposed — still has no path in
-  unless it is bucketed. We stopped intervening at that point deliberately:
-  the categorical version of that exact idea measured +0.0003, below the
-  0.0008 seed-noise floor, so adding a numeric path would have cost an
-  intervention to buy nothing measurable.
-- **Cross-file changes cost an iteration.** Each patch is one whole-file rewrite, so a hypothesis needing a model constructor change *and* a matching call-site change in `train.py` must either fit in one file or take two iterations. A broken interface is caught by the smoke test and rolled back — it costs an iteration, it does not corrupt state.
-- **GPU-hours are reported as 0.0 because the pipeline is CPU-only.** Wall-clock is reported separately and honestly; there is no `nvidia-smi` accounting because there is no GPU in the loop.
-- **The compression gate reasons about a summary, it does not re-train from it.** A stronger version would have the fresh reproducer actually re-run training from the compressed description and compare scores; as built, it is an LLM judgement over a deliberately terse summary with no access to validation scores.
+- **The agent cannot create new files.** `agent/code_editor.py` rewrites whole files at fixed paths, so it can change the loss, the model and its own ablation grid, but cannot add a module. A create-a-file flow needs a different backup/restore mechanism.
+- **Continuous features have no path into the model.** The FM consumes categorical fields only, so a continuous feature must be bucketed. We stopped intervening here deliberately: the categorical version of the agent's proposal measured +0.0003, below the noise floor.
+- **Cross-file changes cost an iteration.** One patch is one whole-file rewrite. A broken interface is caught by the smoke test and rolled back — it costs an iteration, not state.
+- **The recorded trajectory predates three post-run compliance fixes.** Those fixes do not alter the model: every added parameter defaults to prior behaviour, and the smoke-test fingerprint is byte-identical across all of them.
+- **The compression gate reasons about a summary, it does not retrain from it.** A stronger version would have the fresh reproducer re-run training from the compressed description and compare scores.
+- **Given more time**, the one thread we would reopen is *why* an explicit user representation degrades a model whose implicit user representation demonstrably carries signal. We measured that it does, and eliminated noise, cardinality and staleness as explanations. The redundant-pathway account is currently interpretation, not measurement.
 
 ---
 
-In one line: an ablation-guided agent that edits its own feature and label code against real KuaiRand-Pure, scored through the organizer's own vendored evaluator, checked against an unbiased random-exposure log and a fresh-context reproduction gate before any result counts as real.
+In one line: an ablation-guided agent that edits its own pipeline code, scored through the organizer's own evaluator, with every candidate improvement forced past a negative control before it counts as real.
