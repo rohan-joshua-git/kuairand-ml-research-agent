@@ -21,9 +21,9 @@ The organizer's KuaiRand-Pure Starter Kit (vendored verbatim in [`starter_kit/`]
 | Piece | Status | Note |
 |---|---|---|
 | Official baseline reproduction | Implemented | `pipeline/official_baseline.py` runs the vendored FM baseline directly; verified locally to reproduce the published test primary (0.5946) within the 0.0008 seed std — see [Task Requirement #1](#reproducing-the-official-baseline). |
-| End-to-end loop | Implemented | Scores through the vendored `starter_kit/evaluate.py` (GAUC/nDCG@5), not a reimplementation — see [Architecture](#architecture). Hasn't yet been run against a live `ANTHROPIC_API_KEY` in this environment; pipeline mechanics (training, smoke test, rollback, submission) are verified end-to-end against real data. |
-| Self-editing code | Implemented | Real API calls, scoped to `pipeline/data/features.py` and `pipeline/data/label.py`, with automatic rollback on a failed smoke test. See [Limitations](#limitations). |
-| Unbiased referee | Planned | Scoring, propensity estimation, and divergence tracking are implemented and tested in isolation, not yet wired into the live per-iteration loop. |
+| End-to-end loop | Implemented | Scores through the vendored `starter_kit/evaluate.py` (GAUC/nDCG@5), not a reimplementation — see [Architecture](#architecture). Run live against the Gemini backend; every scored run happens in a fresh subprocess (`pipeline/train_runner.py`) so the code being measured is exactly what the last patch wrote. |
+| Self-editing code | Implemented | Real API calls, scoped to `features.py`, `label.py`, `train.py`, `model/baseline.py` and `ablation.py`, with automatic rollback on a failed smoke test — proven for both a syntactically broken patch and one that imports cleanly then crashes at run time (`scripts/test_code_editor.py`). |
+| Unbiased referee | Implemented | Wired into every scored iteration: the trained model scores a validation-window slice of the random-exposure log, and the biased-vs-unbiased divergence is logged per iteration with an alert threshold. |
 | Submission writer | Implemented | `pipeline/submit.py` writes the confirmed `row_id,user_id,video_id,score` schema via the vendored `starter_kit/submit.py`, with row-order alignment cross-checked against `pipeline/data/loader.py`. Verified end-to-end (write + official `--check`/`--score` validation) against real data. |
 
 ## Architecture
@@ -111,7 +111,10 @@ logs/                       generated at runtime: iterations.jsonl, intervention
 
 ```bash
 pip install -r requirements.txt
-export ANTHROPIC_API_KEY=your_key_here   # required, the agent makes real API calls, no offline mode
+# The agent makes real API calls — there is no offline/mock mode. Set the key
+# for whichever provider config/agent_config.yaml selects (default: gemini).
+export GEMINI_API_KEY=your_key_here      # default provider, free tier
+# export ANTHROPIC_API_KEY=your_key_here # if agent.llm.provider is "anthropic"
 
 python -m pipeline.data.download --fetch   # downloads + unpacks the real KuaiRand-Pure dataset (~47MB, no registration)
 python -m pipeline.data.download --check   # verifies everything required is present in ./data/raw
@@ -152,10 +155,10 @@ All of these were unknowns pending the Starter Kit; all are now confirmed and wi
 
 ## Limitations
 
-- **Editable surface is narrow by design.** `agent/code_editor.py` only lets the agent rewrite `pipeline/data/features.py` and `pipeline/data/label.py`, not model architecture or the training loop directly. This was a deliberate scope cut to ship a safe, rollback-capable loop first; extending `EDITABLE_FILES` to `pipeline/model/architectures/` and `pipeline/train.py` (loss function, in particular — the organizer's own #1-ranked lead is a pairwise/listwise loss) is the natural next step, and the highest-value one given the Starter Kit's priority list.
-- **Referee's live per-iteration wiring is partial.** The scoring logic and divergence math (`agent/referee.py`) are implemented and tested in isolation, but `orchestrator.py` doesn't yet run inference over the random-exposure log every iteration; the integration point is marked explicitly in the code (`referee_note` in `orchestrator.py`).
-- **No GPU-hour tracking beyond wall-clock.** `logger.py` reports wall-clock time as a proxy; real GPU-hour accounting (e.g. via `nvidia-smi` polling) isn't wired in — moot for CPU-only runs, which this pipeline is by default.
-- **The live orchestrator loop hasn't been run against a real `ANTHROPIC_API_KEY` in this environment.** Every non-LLM component (data loading, real-data training, GAUC/nDCG@5 scoring via the vendored evaluator, patch rollback, submission writing + validation) is verified end-to-end against real KuaiRand-Pure data; the LLM-driven reflect/iterate loop itself still needs a real run to produce actual run logs, hypotheses, and a final scored delta.
+- **New-file creation is out of scope for the editor.** `agent/code_editor.py` rewrites whole files at fixed paths, so the agent can change the loss, the model and its own ablation grid, but cannot add a new module under `pipeline/model/architectures/`. That needs a create-a-file flow the current backup/restore-one-path mechanism does not support.
+- **Cross-file changes cost an iteration.** Each patch is one whole-file rewrite, so a hypothesis needing a model constructor change *and* a matching call-site change in `train.py` must either fit in one file or take two iterations. A broken interface is caught by the smoke test and rolled back — it costs an iteration, it does not corrupt state.
+- **GPU-hours are reported as 0.0 because the pipeline is CPU-only.** Wall-clock is reported separately and honestly; there is no `nvidia-smi` accounting because there is no GPU in the loop.
+- **The compression gate reasons about a summary, it does not re-train from it.** A stronger version would have the fresh reproducer actually re-run training from the compressed description and compare scores; as built, it is an LLM judgement over a deliberately terse summary with no access to validation scores.
 
 ---
 
