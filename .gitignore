@@ -12,9 +12,22 @@ env/
 *.key
 *.pem
 
-# Logs
+# Logs. The run trajectory, intervention count and resource usage are GRADED
+# EVIDENCE (the organizer asks for the full trajectory with the best run
+# marked), so those are tracked deliberately. The bulky, regenerable parts —
+# raw stdout, checkpoints, scratch CSVs — stay out.
 logs/*
 !logs/.gitkeep
+!logs/iterations.jsonl
+!logs/iterations_pre_*.jsonl
+!logs/interventions.jsonl
+!logs/interventions_pre_*.jsonl
+!logs/restarts.jsonl
+!logs/resource_usage.json
+!logs/pitfalls.json
+
+# Final submission artifacts (regenerable via `python -m pipeline.make_submission`)
+submissions/*.csv
 
 # Raw/processed data (downloadable via pipeline/data/download.py or starter_kit/README.md)
 data/raw/*.csv

@@ -117,15 +117,18 @@ class Orchestrator:
 
         self.ledger = TokenLedger()
         self.llm = build_llm_client(self.cfg, ledger=self.ledger)
+        self.checkpoint = CheckpointManager(
+            checkpoint_dir=self.cfg["logging"]["checkpoint_dir"], editable_files=EDITABLE_FILES
+        )
+        # Resuming continues the SAME logical run, so its trajectory must keep
+        # appending to the same log rather than rotating it away.
         self.logger = RunLogger(
             run_log_dir=self.cfg["logging"]["run_log_dir"],
             intervention_log_path=self.cfg["logging"]["intervention_log"],
             resource_usage_path=self.cfg["logging"]["resource_usage_report"],
+            rotate_existing=not self.checkpoint.exists(),
         )
         self.pitfalls = PitfallStore(path=f"{self.cfg['logging']['run_log_dir']}/pitfalls.json")
-        self.checkpoint = CheckpointManager(
-            checkpoint_dir=self.cfg["logging"]["checkpoint_dir"], editable_files=EDITABLE_FILES
-        )
         self.retriever = SkillRetriever(
             tier1_path=agent_cfg["skill_store"]["tier1_path"],
             tier2_path=agent_cfg["skill_store"]["tier2_path"],

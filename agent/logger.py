@@ -53,14 +53,23 @@ class RunLogger:
             self._rotate_stale_logs()
 
     def _rotate_stale_logs(self) -> None:
-        """A new run must not append to a previous run's trajectory — mixed
-        iteration numbering would corrupt the graded evidence and inflate the
-        intervention count. Prior logs are preserved under a timestamped name,
-        never deleted."""
+        """A genuinely NEW run must not append to a previous run's trajectory —
+        mixed iteration numbering would corrupt the graded evidence. Prior logs
+        are preserved under a timestamped name, never deleted.
+
+        Callers must pass rotate_existing=False when RESUMING from a checkpoint:
+        a supervisor restart continues the same logical run, and rotating there
+        splits one trajectory across files (which previously hid the real best
+        checkpoint from the generated report).
+
+        The intervention log is NEVER rotated. Interventions are a property of
+        the whole effort, not of one process lifetime, and rotating it silently
+        resets the count to zero — the one number that must never be
+        understated."""
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        for path in (self.iteration_log_path, self.intervention_log_path):
-            if path.exists() and path.stat().st_size > 0:
-                path.rename(path.with_name(f"{path.stem}_pre_{stamp}{path.suffix}"))
+        path = self.iteration_log_path
+        if path.exists() and path.stat().st_size > 0:
+            path.rename(path.with_name(f"{path.stem}_pre_{stamp}{path.suffix}"))
 
     def log_iteration(self, record: IterationRecord) -> None:
         with open(self.iteration_log_path, "a", encoding="utf-8") as f:

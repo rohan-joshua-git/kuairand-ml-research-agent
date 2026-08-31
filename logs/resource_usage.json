@@ -1,0 +1,13 @@
+{
+  "token_usage_by_model": {
+    "gemini-3.5-flash": {
+      "input_tokens": 20366,
+      "output_tokens": 17995
+    }
+  },
+  "total_tokens": 38361,
+  "wall_clock_hours": 0.11830431679884593,
+  "gpu_hours": 0.0,
+  "intervention_count": 0,
+  "generated_at": 1788136346.0001035
+}
