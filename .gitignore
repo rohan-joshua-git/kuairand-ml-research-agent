@@ -40,3 +40,13 @@ starter_kit/*.tar.gz
 Thumbs.db
 .vscode/
 .idea/
+
+# Generated code-graph output (graphify) — regenerable via `graphify update .`
+graphify-out/
+
+# Superseded submission artifacts. `submissions/*.csv` above only matches direct
+# children, so archived copies under submissions/<subdir>/ slipped through. The
+# CSVs are regenerable (`python -m pipeline.make_submission --ensemble-seeds N`)
+# and their SHA-256 hashes are recorded in submissions/FROZEN_CONFIG.json, so
+# provenance is tracked without ~7MB of prediction rows.
+submissions/**/*.csv

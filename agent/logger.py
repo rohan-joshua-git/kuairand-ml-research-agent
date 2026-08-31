@@ -87,6 +87,37 @@ class RunLogger:
     def intervention_count(self) -> int:
         return self._intervention_count
 
+    def persisted_intervention_count(self) -> int:
+        """Interventions recorded on DISK, which is the graded number.
+
+        `self._intervention_count` counts only what this process logged. A run
+        that resumes from a checkpoint, or a run that follows an earlier one,
+        starts that counter at zero while `interventions.jsonl` still holds the
+        earlier records — so reporting the in-process counter silently
+        UNDER-REPORTS, in the direction that flatters the Autonomy score.
+
+        Autonomy is graded on "the number of manual interventions required to
+        reach the converged result", and the deliverables ask for that number
+        explicitly, so it must be read from the durable log. Only entries with
+        counts_as_intervention != False are counted: restarting a crashed
+        process is not an intervention (organizer Q&A, 2026-08-31), but
+        changing the agent's behaviour is, and such entries are recorded with
+        counts_as_intervention: true.
+        """
+        if not self.intervention_log_path.exists():
+            return self._intervention_count
+        n = 0
+        with open(self.intervention_log_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    if json.loads(line).get("counts_as_intervention", True):
+                        n += 1
+                except json.JSONDecodeError:
+                    continue
+        return max(n, self._intervention_count)
+
     def write_resource_usage_report(self, token_usage_by_model: dict, wall_clock_hours: float, gpu_hours: float = 0.0) -> None:
         """wall_clock_hours is the run's elapsed time; gpu_hours defaults to
         0.0 because this pipeline is CPU-only by default — don't launder
@@ -96,7 +127,7 @@ class RunLogger:
             "total_tokens": sum(v["input_tokens"] + v["output_tokens"] for v in token_usage_by_model.values()),
             "wall_clock_hours": wall_clock_hours,
             "gpu_hours": gpu_hours,
-            "intervention_count": self._intervention_count,
+            "intervention_count": self.persisted_intervention_count(),
             "generated_at": time.time(),
         }
         self.resource_usage_path.parent.mkdir(parents=True, exist_ok=True)

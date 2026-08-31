@@ -418,31 +418,34 @@ class Orchestrator:
             outcome = ""
 
             if is_new_best:
-                # Play 1: compression gate before trusting this as final-candidate-worthy.
+                # Compression gate — ADVISORY ONLY, never a veto. Organizer FAQ
+                # 2.9.1(c) requires the scored submission to be the validation-best
+                # checkpoint at the point the run stops, and unlike epsilon/N that
+                # rule is not one a team may redeclare under 2.9.1(a). So the gate
+                # no longer rejects a checkpoint; a failed gate is recorded as a
+                # pitfall and feeds the next reflect step instead.
                 gate_result = compression_gate.run_compression_gate(
                     self.llm, hypothesis=hypothesis, code_diff_summary=f"Modified {editable_target}.py per hypothesis above.", cfg=self.cfg
                 )
+                best_metrics = new_metrics
+                iterations_without_improvement = 0
+                self._save_checkpoint(iteration, iterations_without_improvement, best_metrics)
+
                 if gate_result.passed:
-                    best_metrics = new_metrics
-                    iterations_without_improvement = 0
-                    self._save_checkpoint(iteration, iterations_without_improvement, best_metrics)
                     outcome = "accepted as new best (compression gate passed)"
                     print("[orchestrator] New best accepted (compression gate PASSED).")
                 else:
-                    is_new_best = False
-                    target_path.write_text(current_code, encoding="utf-8")
-                    recovery_actions.append("compression gate rejected the checkpoint — restored pre-patch code, kept previous best")
                     self.pitfalls.record(
-                        id=f"compression_gate_fail_{iteration}",
-                        symptom=f"iteration {iteration} scored a new best but failed the compression gate",
+                        id=f"compression_gate_warn_{iteration}",
+                        symptom=f"iteration {iteration} scored a new best but did NOT survive the compression gate",
                         root_cause=gate_result.reasoning[:500],
-                        recovery="rejected; pre-patch code restored; previous best checkpoint retained",
+                        recovery="accepted anyway — FAQ 2.9.1(c) requires the validation-best checkpoint to ship; warning surfaced to the next reflect step",
                         stage="evaluate",
                         iteration=iteration,
                     )
-                    iterations_without_improvement += 1
-                    outcome = "scored above best but REJECTED by compression gate, rolled back"
-                    print("[orchestrator] New best REJECTED by compression gate — likely overfit. Reverting to previous best.")
+                    recovery_actions.append("compression gate warned on this checkpoint — accepted per FAQ 2.9.1(c), warning logged as advisory")
+                    outcome = "accepted as new best (compression gate WARNED — advisory)"
+                    print("[orchestrator] New best accepted, but compression gate WARNED — possible overfit, logged as advisory.")
             else:
                 # Not an improvement above epsilon: restore the pre-patch code
                 # so the working tree always equals the best-known state (and

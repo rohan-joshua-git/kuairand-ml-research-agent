@@ -86,17 +86,44 @@ def load_split(cfg: dict | None = None, allow_test: bool = False) -> KuaiRandSpl
     return KuaiRandSplit(train=train_df.reset_index(drop=True), val=val_df, test=test_df)
 
 
-def load_random_exposure_log(cfg: dict | None = None) -> pd.DataFrame:
+def load_random_exposure_log(cfg: dict | None = None, window: str = "val") -> pd.DataFrame:
     """Loads the uniformly-random-exposure log (Play 1 / referee.py).
 
-    This file sits outside the prescribed train/val/test split. It is
-    in-dataset (shipped as part of KuaiRand-Pure) but its use is gated by
-    `config.referee.mode` pending organizer confirmation — see README.
+    The raw file spans 2022-04-22..05-08, so 897,721 of its 1,186,059 rows
+    (75.7%) fall inside the HIDDEN-TEST window. Organizer FAQ 2.9.2 bars this
+    file from training precisely because its date range "injects in-period
+    information about the scored rows"; FAQ 2.9.3 separately bars test-window
+    labels from model selection. The referee's divergence is surfaced to the
+    agent's reflect step, so the test-window rows are kept out of the loop
+    entirely rather than argued about.
+
+    window:
+      "val"  (default) — 2022-04-22..04-28 only. The only setting anything in
+             the agent loop may use.
+      "full" — the whole file. FAQ 2.9.2 permits this for standalone EDA (it
+             is where tier1_core.md's 75.7% figure came from). Never call it
+             from anything that influences training or selection.
     """
     cfg = cfg or load_config()
     ds = cfg["dataset"]
     raw_dir = Path(ds["raw_dir"])
-    return _read_log(raw_dir, ds["logs"]["random_unbiased"])
+    df = _read_log(raw_dir, ds["logs"]["random_unbiased"])
+
+    if window == "full":
+        return df.reset_index(drop=True)
+    if window != "val":
+        raise ValueError(f"window must be 'val' or 'full', got {window!r}")
+
+    if "date" not in df.columns:
+        # Fail closed: without `date` we cannot prove the test window is excluded.
+        raise ValueError(
+            "Expected a `date` column (YYYYMMDD int) in the random-exposure log; got "
+            f"{list(df.columns)}. Cannot enforce the validation-window restriction, "
+            "so refusing to return unfiltered rows."
+        )
+    val_lo, val_hi = ds["val_range"]
+    val_lo, val_hi = _to_yyyymmdd(val_lo), _to_yyyymmdd(val_hi)
+    return df[(df["date"] >= val_lo) & (df["date"] <= val_hi)].reset_index(drop=True)
 
 
 if __name__ == "__main__":

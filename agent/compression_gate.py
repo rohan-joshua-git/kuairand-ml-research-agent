@@ -1,5 +1,8 @@
 """
-Compression gate — the last check before a checkpoint is designated final.
+Compression gate — an ADVISORY check on a checkpoint that scored a new best.
+It does not veto: organizer FAQ 2.9.1(c) requires the validation-best
+checkpoint to be the one that ships, so a failed gate is logged as a
+pitfall and fed to the next reflect step (see agent/orchestrator.py).
 
 Method (from Bertran, Roth & Wu — see research notes): if a discovered
 improvement is genuine, a short, honest summary of it plus the training

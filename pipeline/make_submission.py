@@ -29,8 +29,15 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=None,
                         help="override only if the converged train.py default is not desired")
     parser.add_argument("--ensemble-seeds", type=int, default=1,
-                        help="train N models with different seeds and rank-average their scores. "
-                             "Measured on validation: 1 seed = 0.6017, 5 seeds = 0.6028.")
+                        help="train N models with different seeds (seed, seed+1, ... seed+N-1) and "
+                             "rank-average their scores. FROZEN FINAL CONFIG: --seed 0 "
+                             "--ensemble-seeds 10. Measured on the DeepFM-lite champion over a "
+                             "20-seed pool: single seed mean 0.6045 (std 0.0005, range "
+                             "0.6036-0.6052), 10-seed rank-average 0.6053. The mean gain is NOT "
+                             "established (it is inside the same-model negative control), but the "
+                             "VARIANCE reduction is: 5-seed std 0.0002 vs single-seed 0.0005, "
+                             "matching sqrt(n). Ensembling is shipped to protect the downside on a "
+                             "one-shot submission, not to claim a higher mean.")
     args = parser.parse_args()
 
     import numpy as np
