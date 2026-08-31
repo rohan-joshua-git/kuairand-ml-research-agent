@@ -342,3 +342,310 @@ implementation).
   the only remaining candidate for decorrelated errors.
 - A 5–10 seed bootstrap pass before any of the ~0.0003 differences above is
   treated as an ordering rather than a tie.
+
+---
+
+## 9. The one candidate, and why it was rejected
+
+The architecture decomposition (section 5.3) produced the session's only
+positive-looking result: dropping the FM pairwise term entirely (`mlp`) scored
+**0.6051 vs 0.6047** for the shipped DeepFM, at identical parameter count. It
+had everything a real finding should have — a mechanism (the pairwise term is
+redundant with what the MLP computes), an independent corroboration (DCN-V2
+ties DeepFM at 0.6047 with 8% more parameters), and a monotone decomposition
+(linear 0.5981 -> fm 0.6020 -> mlp 0.6051) rather than an isolated spike.
+
+It was still rejected. Four threats were separated, and only the first is
+addressed by seed repetition:
+
+| threat | instrument | outcome |
+|---|---|---|
+| (a) seed noise | 8-seed **paired** test | **passed**: +0.00044, wins 8/8, t = 4.49, 95% CI [+0.00025, +0.00064] |
+| (b) validation sampling error | bootstrap over 22,377 users, 2000 resamples | **FAILED**: +0.00028, 95% CI **[-0.00056, +0.00110]** — includes zero |
+| (c) temporal transfer | split-half of validation by date | **FAILED**: +0.00127 early (4/22-4/25) vs **+0.00027 late** (4/26-4/28) |
+| (d) selection over ~30 configurations | none available | **irreducible** — only data never used for selection could, i.e. the hidden test set |
+
+**The negative control is what settled it.** Two different seed groups of the
+IDENTICAL model, pushed through the same bootstrap, differ by |0.00028| with CI
+[-0.00110, +0.00053] — the same magnitude as the "effect". When comparing a
+model against itself yields the same number as comparing it against its rival,
+there is no rival. Every future candidate at this scale must be run against this
+control before it is believed.
+
+**Reconciling (a) with (b).** Both are correct; they answer different questions.
+The paired design cancels seed variance by construction, so it asks "given THESE
+users, is mlp reliably ahead?" — yes, overwhelmingly. The bootstrap asks "would
+this hold on a different sample of users?" — not established. Seed noise was
+never the binding constraint: user-sampling noise (+/-0.0008) is roughly twice
+the effect size. **A tight paired interval is not evidence of generalisation.**
+
+(c) independently condemns it: the effect shrinks 5x across the seven validation
+days, and the hidden test window is later still, so the expected test effect is
+approximately zero.
+
+Verdict: `WEAK`. The champion remains DeepFM at **0.6047** and the submission
+was not regenerated. Recorded because the near-miss is the point — the paired
+t of 4.49 looked conclusive and would have shipped a nonexistent gain.
+
+Method note: the bootstrap is exact, not approximate. GAUC decomposes as a
+positive-count-weighted mean of per-user AUCs and nDCG@5 as a plain mean over
+users, so resampling users and re-aggregating reproduces the metric exactly; we
+verified our decomposition against the official `starter_kit/evaluate.py` at
+**9.6e-15** before trusting it.
+
+---
+
+# Appendix A — Literature considered
+
+Every paper that entered the decision process, what we took from it, and the
+disposition. "Rejected" almost always means *the assumption the paper needs is
+absent from this dataset*, not that the paper is wrong.
+
+## A.1 Adopted — these shaped the pipeline
+
+| Work | What we took | Where it lives |
+|---|---|---|
+| **Rendle et al., Factorization Machines (2010)** | Shared embedding table with per-field offsets; the second-order term is exactly the user×item crossing that within-user ranking needs | `pipeline/train.py`, the starting model |
+| **Guo et al., DeepFM (2017)** | Parallel FM + MLP over a shared embedding | `FactorizationMachineWithMLP` — the accepted model, and the only architecture change that ever produced a win (+0.0021) |
+| **Wang et al., DCN-V2 (arXiv:2008.13535)** | Explicit bounded-degree crosses, `x_{l+1} = x0 ⊙ (W_l x_l + b_l) + x_l`, plus the low-rank variant | Implemented as `CrossNetV2` / `DCNv2`. **Tested, NULL** — ties the control at every setting |
+| **Micci-Barreca (2001), target encoding; CatBoost ordered statistics (Prokhorenkova et al. 2018)** | Empirical-Bayes smoothing, and the insight that in-fold encoding leaks; we use K-fold rather than leave-one-out because LOO is invertible on small cells | `_fit_cross_te` in `pipeline/train.py`; leak verified at 0.7531 in-fold vs 0.1748 OOF |
+| **Gao et al., KuaiRand (2022)** | Dataset semantics: `long_view` definition, the `tab` field, the random-exposure log's intended use | Throughout; `pipeline/data/label.py`, `agent/referee.py` |
+| **Ke et al., LightGBM (2017)** | The M2 rung of the nested ceiling — "what a strong non-neural model extracts from all clean features" | Nested ceiling §6.2, confound test §6.4 |
+
+## A.2 Tested and rejected
+
+| Work | Hypothesis | Result |
+|---|---|---|
+| **Rendle et al., BPR (arXiv:1205.2618)** | Pairwise ranking loss should beat pointwise, since the metric is a ranking metric | **0.5994 vs 0.6017 pointwise.** `NULL` |
+| **Cao et al., ListNet (2007)** | Listwise loss targets top-of-list quality, which nDCG@5 rewards | **0.6004.** `NULL` |
+| **Ma et al., ESMM (arXiv:1804.07931); Ma et al., MMoE (2018); Tang et al., PLE (2020)** | Auxiliary feedback signals (click, like, follow) share a bottom tower and transfer to `long_view` | **0.6013.** `NULL`. Note the classic ESMM motivation does not even apply here — KuaiRand logs `long_view` on *every* impression, not only clicked ones, so there is no sample-selection bias to correct |
+| **Burges, LambdaMART / LambdaRank** | Direct nDCG optimisation with users as groups | **0.5901.** `NULL` — and later diagnosed: it spent top splits on within-user-constant features. Re-run correctly as a plain GBDT it reaches 0.5961, so the original number measured our setup error, not the method |
+| **Zhao et al., D2Q duration deconfounding (arXiv:2206.06003)** | Watch-time bias by video duration; deconfound by duration quantile | `duration_ms` is already bucketed by train quantiles for exactly this reason. Conditional on video quality, duration contributes **−0.0003**. `NULL` |
+| **CWM / play-time modelling** | Use continuous play ratio as an auxiliary regression target rather than the thresholded label | Subsumed by the multi-task result above. `NULL` |
+
+## A.3 Rejected structurally — the assumption is absent from this data
+
+| Work | Assumption it requires | Why it fails here |
+|---|---|---|
+| **Covington et al., YouTube DNN (2016)** | Large catalog, retrieval-then-rank | Candidate sets are given and tiny (median 4). There is no retrieval stage to model |
+| **Zhou et al., DIN (2018) / DIEN (2019)** | User history predicts affinity to the candidate | `user × video` = 0.4973, measured three times. There is no affinity signal to attend over |
+| **Kang & McAuley, SASRec (2018); Sun et al., BERT4Rec (2019)** | Sequential order of consumption carries signal | Same null, plus repeat exposure is 1.62% of rows with an identical `long_view` rate (0.3072 vs 0.3134) |
+| **Li et al., MIND (2019); Cen et al., ComiRec (2020)** | Users have multiple separable interests worth disentangling | Requires a personalisation signal that measures at chance |
+| **He et al., LightGCN (2020); Wu et al., SGL (2021)** | User–item bipartite graph propagation improves collaborative signal | The collaborative signal itself is absent; propagating noise does not create signal |
+| **Wei et al., MMGCN (2019) / MMSSL (2023)** | Multimodal item content (frames, audio, text) | KuaiRand-Pure ships no frames, audio or captions. `NOT_APPLICABLE` |
+| **Chen et al., Top-K off-policy correction (2019)**; **Schnabel et al., unbiased learning (2016)**; **AutoDebias** | A uniform-exposure sample usable for training or propensity estimation | The random log is **75.7% inside the hidden-test window** and its `long_view` rate is 0.085 vs 0.313. Using it means test contamination plus train/serve mismatch. Kept for the referee probe only |
+| **Liu et al., Monolith (arXiv:2209.07663)** | Online/streaming training with collision-free hashing at industrial scale | Offline fixed benchmark, 7,583 items. The engineering it solves is not our bottleneck |
+| **TikTok HCI / attention-economics literature** | Behavioural constructs (novelty seeking, choice overload, attention decay) observable in the log | Only `pos_bucket` is measurable, and it is already in the model (+0.0011 conditional). The rest have no observable proxy |
+
+## A.4 Agent-design literature (methodology, not modelling)
+
+| Work | Use |
+|---|---|
+| **AutoRecLab (arXiv:2510.18104)** | Autonomous RecSys research-agent framing: hypothesis → code → experiment → reflect, with an experiment log as the artifact |
+| **AgentX (arXiv:2606.26859)** | Agent-orchestration patterns; informed the checkpoint/resume and rollback design |
+
+---
+
+# Appendix B — The full method backlog, item by item
+
+All ~95 families that were formally considered, with disposition. Status
+vocabulary as defined at the top of this document. The single most common
+outcome is `REJECTED_STRUCTURALLY`, which is a statement about **this
+benchmark**, not about the method.
+
+### Items 1–5 — the mainstream candidates
+
+| # | Family | Status | Reason |
+|---|---|---|---|
+| 1 | Feature engineering (frequency/count/log-count encodings, ratios, differences, normalisation, quantile transforms, rank/percentile, binning, crosses, reliability counts, historical aggregates, recency, momentum, trend, rolling stats, EWMA, volatility, z-scores, residual features) | mixed | Binning and crosses **adopted** (`dur_bucket`, `pos_bucket`). Count/popularity **NULL** (train exposure 0.5396, transductive 0.5189). Rank/percentile **NULL** (ranking-invariant, §5.1). Momentum/rolling/EWMA/volatility **REJECTED_STRUCTURALLY** (`upload_dt` has 3 values) |
+| 2 | Candidate-relative modelling (percentile, rank in set, minus set mean/median, z-score, relative freshness/popularity/duration, set variance, entropy, diversity, difficulty) | `NULL` | Percentile alone 0.6382 vs raw prior 0.6387 — ranking-identical. Conditional: −0.0181, −0.0061, −0.0049, −0.0005, −0.0004 |
+| 3 | Feature interactions (DCN, **DCN-V2**, DeepFM, xDeepFM, AutoInt, FiBiNET, AFM, FFM, FwFM, NFM, explicit crosses, learned interaction matrices, low-rank) | `NULL` | DeepFM adopted. DCN-V2 implemented and tested at 2/3 layers, full and low rank — ties control (0.6047/0.6050/0.6048 vs 0.6047). Explicit `video × tab` cross also flat. Decomposition shows the pairwise term contributes **less** than the MLP and the two do not stack, so xDeepFM/AutoInt/FiBiNET were not pursued — same mechanism, already falsified |
+| 4 | Learning-to-rank (pointwise logistic/MSE, RankNet, BPR, pairwise logistic/hinge, LambdaRank, LambdaMART, ListNet, ListMLE, ApproxNDCG, SoftRank) | `NULL` | Three independent implementations: BPR 0.5994, ListNet 0.6004, LambdaMART 0.5901 — all below pointwise 0.6017. The remaining variants are interpolations of the same three ideas |
+| 5 | GBDTs (CatBoost, LightGBM, XGBoost, ExtraTrees, RF, HistGradientBoosting) | `NULL` | LightGBM reaches 0.5961 over all clean features, 0.6023 with identity, versus the neural model's 0.6048. Used as the M2 rung and as an ensemble member, not as a champion. CatBoost's specific selling point — ordered target statistics — was adopted directly in `_fit_cross_te` instead |
+
+### Items 6–15 — the temporal / quantitative-finance family
+
+**All `REJECTED_STRUCTURALLY` on one measurement: `upload_dt` has three
+distinct values** (2022-04-09/10/11). Every video in KuaiRand-Pure was uploaded
+inside a 3-day window, so there is no video lifecycle, no age distribution, and
+no virality curve to model. Independently confirmed: exponentially
+recency-weighting the quality prior across the 13 training days is flat (0.6389
+vs 0.6387) and a 2-day half-life hurts (0.6342).
+
+| # | Family |
+|---|---|
+| 6 | Temporal feature engineering (upload age, log age, age buckets, cyclical hour/day, rolling mean/median/std/count/target-rate, EWMA, momentum, acceleration, trend, slope, time since peak, multi-horizon 1h/3h/6h/12h/1d/3d) |
+| 7 | Freshness transforms (`age`, `log(1+age)`, `exp(−λ·age)`, `(1+age)^−α`, learned/piecewise decay, splines, age percentile, age × position/tag/type/popularity) |
+| 8 | Quant-finance temporal (momentum, mean reversion, volatility, EWMA vol, vol-of-vol, z-score shocks, drawdown, distance from max, time since max, Sharpe-like ratios) |
+| 9 | Multi-timescale forecasting / HAR |
+| 10 | HMM / latent regimes (2/3/4-state, Gaussian HMM, Markov-switching regression and AR) |
+| 11 | Kalman / state-space (local level, local trend, DLM, exponential state-space) |
+| 12 | Change-point detection (CUSUM, Page-Hinkley, PELT, Bayesian online change-point, binary segmentation) |
+| 13 | Hawkes / point processes (Poisson, non-homogeneous, Hawkes, multivariate, marked, self-exciting intensity) |
+| 14 | Time-series forecasting (AR, MA, ARMA, ARIMA, SARIMA, ARIMAX, SARIMAX, ETS, Holt, Holt-Winters, TBATS, VAR, VARMA, VECM) |
+| 15 | GARCH family (ARCH, GARCH, EGARCH, GJR, TGARCH, APARCH, FIGARCH, stochastic volatility, component GARCH, GARCH-MIDAS) |
+
+Hour-of-day and day-of-week *were* tested separately, since they do not depend
+on `upload_dt`: marginal 0.5126 and 0.5104, conditional on video quality
+**+0.0002** and effectively zero. `NULL`.
+
+### Items 16–20 — statistical modelling
+
+| # | Family | Status | Reason |
+|---|---|---|---|
+| 16 | PCA / SVD / NMF / factor analysis / ICA / random projection on video×behaviour matrices | `NOT_APPLICABLE` | 7,583 videos with ~150 impressions each. The `video_id` embedding already learns a dense low-rank item representation from ample data; a separate decomposition of the same counts adds no information |
+| 17 | Target encoding (video, author, tag, music, video-type, upload-type, interactions) with Bayesian smoothing, empirical Bayes, hierarchical shrinkage, ordered statistics | mixed | **Adopted** as machinery (verified leak-safe). As a *feature*: author/music `REJECTED_STRUCTURALLY` (87%/98% single-video — corr 0.985/0.987 with the video prior), tag `NULL` (conditional +0.0001), video×tab `NULL` (0.6046 vs 0.6046) |
+| 18 | Hierarchical Bayesian partial pooling `global → tag → author → video` | `REJECTED_STRUCTURALLY` | The hierarchy has two real levels, not four: author and music are ~1 video each, so those levels are the leaf |
+| 19 | Confidence-weighted learning (sample weights, soft/ordinal labels, auxiliary regression on play ratio, hard-negative and uncertainty weighting) | `NULL` | Covered by the multi-task auxiliary result (0.6013). `play_time_ms` is legitimate as a training-time target but not as a feature |
+| 20 | Multi-task (shared bottom, MMoE, PLE, task towers, cross-stitch, uncertainty weighting, GradNorm, PCGrad) | `NULL` | Auxiliary head 0.6013 vs 0.6017 pointwise |
+
+### Items 21–50 — broader ML and methodology
+
+| # | Family | Status | Reason |
+|---|---|---|---|
+| 21 | Supervised learning (logistic, GLM, regularised linear, MLP, boosting, SVM, RF, ensembles) | tested | This *is* the model family. Decomposed in §5.3: linear 0.5981, fm 0.6020, mlp 0.6051, deepfm 0.6047 |
+| 22 | Unsupervised clustering (k-means, GMM, hierarchical, DBSCAN/HDBSCAN, spectral, UMAP, t-SNE, NMF, autoencoders) as cluster-ID features | `REJECTED_STRUCTURALLY` | Video clusters are a coarsening of `video_id`, which the model already has at full resolution; user clusters are within-user-constant |
+| 23 | Self-supervised (masked feature prediction, contrastive, temporal contrastive, next-event, denoising) | `NOT_APPLICABLE` | Pretraining objectives need either sequence structure (absent) or content (absent) |
+| 24 | Metric learning (Siamese, triplet, contrastive, InfoNCE, proxy-based) | `REJECTED_STRUCTURALLY` | Learns a user–item similarity space; that similarity measures at chance here |
+| 25 | Sequence modelling (Transformer, GRU, LSTM, TCN, temporal attention, state-space, Mamba) | `REJECTED_STRUCTURALLY` | No personalisation signal; organizer priority-2 lead closed by measurement |
+| 26 | Graph learning (GNN, GAT, GraphSAGE, heterogeneous GNN, hypergraph) and graph-derived features (degree, PageRank, centrality, community, neighbour quality) | `REJECTED_STRUCTURALLY` | The video→author and video→music graphs are near-perfect matchings (87%/98% single-video), so degree/centrality are constants. video→tag is the only real edge set and tag is conditionally null |
+| 27 | Network science (centrality, PageRank, community detection, assortativity, k-core, graph entropy) | `REJECTED_STRUCTURALLY` | Same degenerate graph |
+| 28 | Information theory (entropy, mutual information, conditional MI, information gain, KL/JS divergence, surprisal, novelty `−log P(x)`) | partially adopted | The **conditional probe** (§2.1) is a practical estimator of conditional MI and became our primary instrument. Surprisal as a *feature* is a monotone function of popularity, measured at 0.5396 marginal. `NULL` |
+| 29 | Signal processing (moving averages, EMA, Savitzky-Golay, Butterworth, low/high-pass, wavelets, FFT, spectral entropy, autocorrelation) | `REJECTED_STRUCTURALLY` | Requires a time series per entity; `upload_dt` has 3 values and per-video impression counts are ~150 over 13 days |
+| 30 | Survival analysis (Cox, Weibull, exponential, AFT, discrete hazard, competing risks) | `NOT_APPLICABLE` | The natural target is watch-time hazard, i.e. `play_time_ms` — an outcome of the impression being predicted, so leakage as a feature. As a training target it reduces to the auxiliary-regression result (`NULL`) |
+| 31 | Discrete choice (multinomial/conditional/nested/mixed logit, multinomial probit) | `NOT_IDENTIFIABLE` | Conceptually the closest formal match to "choose among a small candidate set". But conditional logit with item fixed effects **is** our linear model (0.5981), and random coefficients over users is what the user embedding already provides (+0.0091). Not separately testable with this design |
+| 32 | Marketing science (choice modelling, uplift, persuasion, repeat exposure, diminishing returns, RFM, heterogeneity) | `REJECTED_STRUCTURALLY` | Repeat exposure is 1.62% of rows at an identical rate; RFM constructs are within-user-constant |
+| 33 | CLV (BG/NBD, Pareto/NBD, Gamma-Gamma, survival CLV) | `REJECTED_STRUCTURALLY` | Purely user-level; cannot reorder a user's candidates |
+| 34 | Behavioural economics (recency bias, availability, novelty seeking, familiarity, diminishing utility, choice overload, anchoring, loss aversion, scarcity, attention allocation) | `NULL` | The measurable proxies are position (in the model, +0.0011 conditional) and candidate-set size/spread (conditional −0.0049 / −0.0004) |
+| 35 | Psychometrics / IRT (Rasch, 2PL, 3PL, multidimensional) | `NOT_IDENTIFIABLE` | Maps to user ability × item difficulty — which is a rank-1 user×item model, i.e. exactly the affinity term measured at 0.4973 |
+| 36 | Attention economics (limited attention, salience, position bias, attention decay, information foraging) | partially adopted | Position bias is real and captured: `pos_bucket` is in the model, long_view falls 0.337→0.195 from first to twelfth impression |
+| 37 | Decision theory (expected utility, Bayesian decision theory, risk-sensitive ranking `E[u] − λ·Var`) | `NOT_APPLICABLE` | Scoring is a fixed pointwise metric; there is no decision-cost asymmetry to exploit |
+| 38 | Uncertainty quantification (ensemble variance, Bayesian, MC dropout, conformal, temperature scaling, isotonic) | `NULL` | Calibration cannot change GAUC or nDCG: a **global monotone** transform preserves every within-user ordering. Only group-wise recalibration can, and per-tab quality curves are already monotone (corr ≈ +0.99) |
+| 39 | Optimal transport (Wasserstein, Sinkhorn, OT embeddings, distributional alignment) | `NOT_APPLICABLE` | No domain-adaptation problem: train and eval are the same distribution modulo a 7-day shift |
+| 40 | Distribution shift (PSI, KS, JS, Wasserstein, MMD, adversarial validation) | diagnostic | Ran the temporal split-half in that spirit; used for validation of findings, not as a score lever |
+| 41 | Continual learning (replay, rehearsal, temporal fine-tuning, EWC, online SGD, sliding windows, exponential decay) | `NULL` | Directly tested. Recency weighting flat (0.6389 vs 0.6387); 2-day half-life harmful (0.6342) |
+| 42 | Online learning (online logistic, FTRL, online boosting, passive-aggressive) | `NOT_APPLICABLE` | Fixed offline benchmark; nothing arrives incrementally |
+| 43 | Contextual bandits (LinUCB, Thompson sampling, NeuralUCB/TS, bootstrapped) | `NOT_APPLICABLE` | Candidate sets are pre-determined and logged. No exploration is possible |
+| 44 | Reinforcement learning (DQN, policy gradient, actor-critic, offline RL, CQL, IQL, Decision Transformer) | `NOT_APPLICABLE` | Same — no environment, no action space, no long-horizon return |
+| 45 | Causal inference (causal forests, treatment effects, doubly robust, propensity models, causal representation, discovery) | `REJECTED_STRUCTURALLY` | Needs the random-exposure log, which is 75.7% inside the hidden-test window |
+| 46 | Granger causality | `REJECTED_STRUCTURALLY` | Needs time series per entity; see items 6–15 |
+| 47 | Experiment design (controlled experiments, factorial, ablations, bootstrap, repeated seeds, paired tests, sequential testing, multiple-comparison correction, power analysis, effect sizes) | **adopted** | This became central. 3-seed minimum; 8-seed **paired** test on the one live candidate (t = 4.49, 95% CI [+0.00025, +0.00064]); user-level bootstrap; a **negative control** comparing two seed groups of the same model; explicit acknowledgement of selection bias over ~30 comparisons |
+| 48 | Counterfactual testing (controlled perturbations, re-score, measure change) | `NOT_IDENTIFIABLE` here | Implemented as conditional permutation within `(quality, tab)` strata. **Confounded**: author, tag and upload_type are deterministic functions of `video_id`, so permuting them manufactures impossible inputs. Only `pos_bucket` (−0.0029) is interpretable. See §7.4 |
+| 49 | Residual analysis | **adopted** | Became the residual probe (§2.2). Result: nothing named predicts the residual (−0.0002..+0.0002) |
+| 50 | Adversarial validation | not run | Superseded — the temporal split-half answers the same question directly for the one candidate that mattered |
+
+### Items 51–81 — unconventional and content-dependent
+
+| # | Family | Status | Reason |
+|---|---|---|---|
+| 51 | Evolutionary / genetic feature construction, architecture and hyperparameter search | `NOT_APPLICABLE` | Search needs a signal gradient. The conditional probe shows the feature space is flat: every candidate lands within ±0.0004 of zero. Evolution over a flat landscape is a random walk |
+| 52 | Symbolic regression | same | Same reason |
+| 53 | Game theory (Nash, strategic recommendation, creator incentives, congestion) | `NOT_APPLICABLE` | No strategic agents in a logged offline benchmark |
+| 54 | Operations research (assignment, integer/stochastic/robust programming) | `NOT_APPLICABLE` | Scoring is per-row and independent; there is no allocation constraint |
+| 55 | Queueing theory | `NOT_APPLICABLE` | No arrival process is modelled or scored |
+| 56 | Control theory (PID, Kalman control, MPC, adaptive control) | `NOT_APPLICABLE` | Needs a closed loop |
+| 57 | Dynamical systems (attractors, stability, phase transitions, Lyapunov) | `REJECTED_STRUCTURALLY` | Needs trajectories; see items 6–15 |
+| 58 | Complex systems (emergence, cascades, criticality, preferential attachment) | `REJECTED_STRUCTURALLY` | Virality dynamics require a lifecycle; 3 upload dates |
+| 59 | Agent-based modelling | `NOT_APPLICABLE` | Would produce synthetic data, which the rules forbid for training |
+| 60 | Synthetic user simulation (statistical, LLM-agent, behavioural) | `NOT_APPLICABLE` | Same — no external or generated training data permitted |
+| 61 | Extreme value theory (GEV, GPD, peaks-over-threshold, tail index) | `REJECTED_STRUCTURALLY` | Models tail events over time; no lifecycle |
+| 62 | Copulas | `NOT_APPLICABLE` | Dependence structure between item attributes is not what a within-user ranking scores |
+| 63 | Topological data analysis (persistent homology, Mapper, Betti numbers) | `NOT_APPLICABLE` | Exploratory only; no route to a ranking score |
+| 64 | Hyperbolic geometry (Poincaré embeddings, hyperbolic NNs) | `REJECTED_STRUCTURALLY` | Needs a hierarchy. The available one (`tag → video`) is two levels with 110 nodes |
+| 65 | Tensor methods (CP, Tucker, tensor-train on user×video×time) | `REJECTED_STRUCTURALLY` | The user×video mode is the affinity signal, measured at chance; the time mode has 3 upload dates |
+| 66 | Compressed sensing / robust PCA | `NOT_APPLICABLE` | The interaction matrix is not sparse in the relevant sense — 7,583 items, ~150 impressions each |
+| 67 | Reservoir computing (echo state networks, liquid state machines) | `REJECTED_STRUCTURALLY` | Sequence models over a signal measured at chance |
+| 68 | Diffusion models | `NOT_APPLICABLE` | Generative; would require synthetic data |
+| 69 | Generative models (VAE, GAN, autoregressive, flows) | `NOT_APPLICABLE` | Same |
+| 70 | Normalizing flows (density estimation, anomaly, uncertainty) | `NOT_APPLICABLE` | Same |
+| 71 | Anomaly detection (Isolation Forest, One-Class SVM, LOF, autoencoder) | `NULL` by proxy | An item-anomaly score is a function of item attributes the model already encodes; conditional on quality, every attribute is ≤ +0.0003 |
+| 72 | Novelty modelling (`−log P(video/tag/type)`, distance from historical distribution) | `NULL` | Monotone in popularity; measured 0.5396 marginal, and popularity conditional on quality adds nothing |
+| 73 | Diversity / serendipity as a feature | `NULL` | Candidate-set diversity and spread tested: conditional −0.0004 |
+| 74 | Submodular optimisation | `NOT_APPLICABLE` | Requires selecting a set; we score a fixed set |
+| 75 | Multi-objective optimisation | `NOT_APPLICABLE` | Single scored label |
+| 76 | Computational advertising (click/conversion prediction, position bias, delayed feedback, attribution, auctions, ad fatigue) | partially adopted | Position bias adopted (`pos_bucket`). Delayed feedback and attribution have no analogue: `long_view` is logged immediately per impression |
+| 77 | Market basket analysis (Apriori, FP-Growth, association rules, lift) | `REJECTED_STRUCTURALLY` | Co-occurrence within a user's ~4 impressions is far too sparse to mine rules |
+| 78 | Knowledge graphs (path features, node2vec, TransE, RotatE, ComplEx) | `REJECTED_STRUCTURALLY` | The graph is video→author (matching), video→music (matching), video→tag (110 nodes). No path structure |
+| 79 | NLP (TF-IDF, BM25, embeddings, topic models, BERTopic, sentiment) | `NOT_APPLICABLE` | No text in KuaiRand-Pure. Zenodo caption/category supplements exist but were never organizer-sanctioned and would be external data |
+| 80 | Computer vision (CLIP, ViT, ResNet, scene/object/aesthetic features) | `NOT_APPLICABLE` | No frames |
+| 81 | Multimodal fusion (CLIP-style alignment, cross-attention, multimodal contrastive) | `NOT_APPLICABLE` | Needs items 79–80 |
+
+### Items 82–95 — future architecture and agent design
+
+| # | Family | Status | Reason |
+|---|---|---|---|
+| 82 | Semantic IDs (RQ-VAE, VQ, product quantisation, generative recommendation) | `NOT_APPLICABLE` | Semantic IDs compress *content* into tokens; there is no content here. And 7,583 items need no compression |
+| 83 | Unified embeddings (shared item representation across retrieval and ranking) | `NOT_APPLICABLE` | No retrieval stage |
+| 84 | Spotify-style unified search/recommendation | `NOT_APPLICABLE` | No queries in the dataset |
+| 85 | Etsy-style unified retrieval/ranking | `NOT_APPLICABLE` | Same as 83 |
+| 86 | LLM-generated synthetic labels (topic, emotion, novelty, humour) | `NOT_APPLICABLE` | Requires content to label, and would constitute external data |
+| 87 | LLM synthetic data (users, preferences, interactions, hard negatives) | `NOT_APPLICABLE` | External training data is prohibited |
+| 88 | Autonomous recommender agents (research agent + critic + deterministic evaluator + experiment DB) | **adopted — this is the project** | `agent/orchestrator.py`, `agent/referee.py`, `agent/compression_gate.py`, `logs/iterations.jsonl` |
+| 89 | Autonomous feature discovery | **adopted** | The agent proposes feature hypotheses against `pipeline/data/features.py`; the `EXTRA_CATEGORICAL_FIELDS` registry exists specifically so its patches take effect (an earlier bug made four of them silent no-ops) |
+| 90 | Autonomous model selection across a model zoo | partially adopted | `model_type` now selects among linear / fm / mlp / deepfm / dcnv2. Not yet agent-driven |
+| 91 | Autonomous scientific falsification (propose → challenge → control experiments) | **adopted** | `agent/compression_gate.py` rejects a checkpoint a fresh context cannot justify. Extended manually this session with negative controls and paired tests |
+| 92 | Autonomous experiment prioritisation (expected gain × P(success) ÷ cost) | **adopted informally** | The conditional probe *is* a cost-reduction device: seconds instead of a training run, which is what made triaging 95 families affordable |
+| 93 | Autonomous literature mining | partially adopted | The skill store (`tier1_core.md`, `tier2_domain.md`, `tier3_deep/`) is a hand-curated version of this |
+| 94 | Autonomous experiment memory (hypothesis, result, confidence, failure reason, verdict) | **adopted** | `tier1_core.md` is exactly this, and it prevented several re-tests. The status vocabulary in this document is its formalisation |
+| 95 | Multi-agent research system (researcher / critic / planner / experiment manager) | future work | Single-agent with a compression gate acting as critic. A full split was judged higher risk than value before the deadline |
+
+---
+
+# Appendix C — The reasoning chain, in order
+
+How the conclusions actually developed, including the wrong turns. Each arrow is
+a decision point where the evidence changed what we did next.
+
+1. **Start:** accepted pipeline at 0.6047, +0.0031 over baseline. The question
+   posed was "what method extracts more signal?"
+2. **First instinct — wrong.** We ranked author/music/tag target encoding as the
+   top experiment, from marginal within-user GAUC (author 0.6439, music 0.6413).
+   → **Checked entity granularity and it collapsed:** 87% of authors and 98% of
+   music_ids own exactly one video; `corr(video_te, author_te) = 0.985`. The
+   marginal score was the video prior wearing a different label. *Lesson: check
+   the granularity of an entity before believing its aggregate score.*
+3. → **Audited the raw files before modelling.** Found `upload_dt` has 3 values.
+   That single fact closed items 6–15 plus 57, 61, 67 — roughly a quarter of the
+   backlog — without an experiment.
+4. → **Found `tab` crossed with everything looks powerful** (video 0.6387 →
+   0.6479; tag1 0.5604 → 0.6153). Built it properly as a leak-safe out-of-fold
+   encoding. **Flat: 0.6046.** *Lesson: a cross's standalone score overstates
+   its incremental value when the model already holds both parents — the FM's
+   second-order term had it already.*
+5. → **Proposed that `user_id` is a pure overfitting engine**, reasoning from
+   `user × video` = 0.4970 and the fact that its linear term cannot reorder.
+   **Refuted at −0.0091.** *Lesson: a field can matter through a channel the
+   marginal probes do not measure.*
+6. → **Built the conditional probe** because marginal GAUC kept misleading us.
+   Controlling for video quality, only `tab` survives (+0.0172); everything else
+   including all user metadata lands in −0.0004..+0.0001.
+7. → **An external critique identified a real hole:** `user_features_pure.csv`
+   was genuinely unused. Tested it properly — **null at model level** (−0.0002
+   and +0.0001), matching the conditional probe.
+8. → **Decomposed `tab`.** It is a *reordering* signal that is inert for the 60%
+   of users inside one tab (+0.0001) and worth +0.0314 for those who span tabs.
+   Within a tab, quality is monotone (corr ≈ +0.99) — so its entire effect is
+   the level gap between tabs.
+9. → **Built the nested ceiling** and it corrected the story we were converging
+   on: 0.5807 → 0.5877 → 0.5961 → 0.6048, i.e. **roughly equal thirds**, not
+   "quality + tab explains everything". A third of the signal is captured only
+   by learned structure.
+10. → **The residual probe came back null on every named feature** — while the
+    model still beat a GBDT by +0.0087. Both are true because the probe can only
+    test features we can *name*. A null residual probe bounds named features, not
+    the model.
+11. → **Caught a confound in that GBDT comparison:** it saw one scalar per video
+    where the network sees an embedding. Equalising identity closed 65% of the
+    gap — and the entire gain came from `user_id`, converging with (5).
+12. → **DCN-V2 tied the control at every setting**, and all five neural families
+    correlate ≥ 0.998, so ensembling them is futile. Higher-order interaction
+    structure is not the missing mechanism.
+13. → **Decomposed the architecture instead:** linear 0.5981 → fm 0.6020 → mlp
+    **0.6051** → deepfm 0.6047. The nonlinearity does the work; the pairwise term
+    is redundant with it and mildly harmful alongside it. This *predicted* (12)
+    rather than being fitted to it.
+14. → **Subjected the one candidate to adversarial testing** rather than
+    accepting it: 8-seed paired test (t = 4.49, CI [+0.00025, +0.00064]), a
+    user-level bootstrap, a temporal split-half, and a negative control of two
+    seed groups of the same model. With the standing caveat that none of these
+    can correct selection over ~30 validation comparisons.

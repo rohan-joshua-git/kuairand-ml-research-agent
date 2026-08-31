@@ -178,6 +178,17 @@ Findings 1-2 came from reading the raw KuaiRand-Pure field spec and file manifes
 
 ## Research record
 
+**Headline result of the extended investigation: no change.** Validation primary
+remains 0.6047. Roughly 95 method families were triaged, six substantive
+hypotheses were tested at three or more seeds, and one candidate (dropping the
+FM pairwise term) passed an 8-seed paired test at t = 4.49 before being
+**rejected** by a user-level bootstrap whose CI included zero, a temporal
+split-half showing the effect decaying 5x toward the test window, and a negative
+control in which two seed groups of the *same* model differed by the same
+magnitude as the "effect". That near-miss is documented in full, because a tight
+paired interval is not evidence of generalisation.
+
+
 `docs/research_process.md` is the full account of this investigation: every hypothesis considered, what was dropped and on what evidence, the measured result of each experiment, and the reasoning connecting them. It also records our own process failures and the two occasions where a headline hypothesis of ours was refuted by measurement.
 
 It uses an explicit status vocabulary, because "tested and found nothing" and "the dataset cannot express this" are very different claims: `SUPPORTED`, `WEAK`, `NULL`, `REJECTED_STRUCTURALLY`, `NOT_IDENTIFIABLE`, `NOT_APPLICABLE`. Roughly 90 method families were triaged; the majority are `REJECTED_STRUCTURALLY`, which is a statement about this benchmark, not about the methods.
