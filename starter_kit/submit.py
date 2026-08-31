@@ -1,24 +1,22 @@
-"""Generate / validate the submission file.
+"""生成与校验提交文件。
 
-Submission format: CSV with header, one row per eval-split row:
+提交格式（CSV，含表头）：
     row_id,user_id,video_id,score
 
-  row_id   : 0-based row index, corresponding to data.load()[split] row order (deterministic:
-             read log_standard_4_08_to_4_21_pure.csv then log_standard_4_22_to_5_08_pure.csv,
-             filter by date, keep file order)
-  user_id  : that row's user_id (redundant field, used only to verify alignment)
-  video_id : that row's video_id (redundant field, used only to verify alignment)
-  score    : your model's score for that row (any real number, only relative order matters)
+  row_id   : 0 起的行号，对应 data.load()[split] 的行序（确定性：先读
+             log_standard_4_08_to_4_21_pure.csv 再读 log_standard_4_22_to_5_08_pure.csv，
+             按 date 过滤后保持原文件顺序）
+  user_id  : 该行的 user_id（冗余字段，仅用于校验对齐）
+  video_id : 该行的 video_id（冗余字段，仅用于校验对齐）
+  score    : 你的模型给该行打的分，任意实数，只用相对大小
 
-Why row_id is required: (user_id, video_id) is NOT unique within the eval split
-(3.06% of test rows are repeated pairs, up to 12 times), so it cannot serve as a key.
+为什么带 row_id：(user_id, video_id) 在评测集里**不唯一**
+（test 集有 3.06% 的重复对，最多重复 12 次），所以无法作为主键。
 
-Usage:
-    python3 submit.py --make   submission.csv     # generate an example submission with the official FM baseline
-    python3 submit.py --check  submission.csv     # validate format + alignment only
-    python3 submit.py --score  submission.csv     # validate + score (valid split only, locally)
-
-Vendored verbatim (logic-for-logic) from the organizer-provided KuaiRand-Pure Starter Kit.
+用法：
+    python3 submit.py --make   submission.csv     # 用官方 FM baseline 生成一份示例提交
+    python3 submit.py --check  submission.csv     # 校验格式与对齐
+    python3 submit.py --score  submission.csv     # 校验并打分（仅本地 valid 可用）
 """
 import argparse, csv, sys
 from data import load, encode
@@ -34,33 +32,33 @@ def write_submission(path, rows, scores):
             w.writerow([i, x[1], x[2], f"{float(s):.6g}"])
 
 def read_submission(path, rows):
-    """Reads and validates alignment; returns scores. Any mismatch raises a readable error."""
+    """读取并逐行校验对齐，返回 scores。任何不一致都抛出可读错误。"""
     with open(path, newline='') as fh:
         r = csv.reader(fh)
         head = next(r, None)
         if head != HEADER:
-            raise ValueError(f"header must be {','.join(HEADER)}, got {head}")
+            raise ValueError(f"表头必须是 {','.join(HEADER)}，实际是 {head}")
         scores, n = [], 0
         for ln, rec in enumerate(r, start=2):
             if len(rec) != 4:
-                raise ValueError(f"line {ln} has {len(rec)} fields, expected 4")
+                raise ValueError(f"第 {ln} 行有 {len(rec)} 个字段，应为 4 个")
             rid, uid, vid, sc = rec
             if int(rid) != n:
-                raise ValueError(f"line {ln} row_id={rid}, expected {n} (must be 0-based, strictly increasing)")
+                raise ValueError(f"第 {ln} 行 row_id={rid}，应为 {n}（必须 0 起连续递增）")
             if n >= len(rows):
-                raise ValueError(f"submission has more rows than the eval split ({len(rows)} rows)")
+                raise ValueError(f"提交行数超过评测集（评测集 {len(rows)} 行）")
             if uid != rows[n][1] or vid != rows[n][2]:
-                raise ValueError(f"line {ln} alignment mismatch: submitted ({uid},{vid}), "
-                                 f"eval split row {n} is ({rows[n][1]},{rows[n][2]})")
+                raise ValueError(f"第 {ln} 行对齐错误：提交 ({uid},{vid})，"
+                                 f"评测集第 {n} 行是 ({rows[n][1]},{rows[n][2]})")
             try:
                 v = float(sc)
             except ValueError:
-                raise ValueError(f"line {ln} score is not parseable as a number: {sc!r}")
+                raise ValueError(f"第 {ln} 行 score 无法解析为数字：{sc!r}")
             if v != v or v in (float('inf'), float('-inf')):
-                raise ValueError(f"line {ln} score is NaN/Inf, not allowed")
+                raise ValueError(f"第 {ln} 行 score 是 NaN/Inf，不允许")
             scores.append(v); n += 1
     if n != len(rows):
-        raise ValueError(f"submission has {n} rows, eval split has {len(rows)}, count mismatch")
+        raise ValueError(f"提交 {n} 行，评测集 {len(rows)} 行，数量不符")
     return scores
 
 if __name__ == '__main__':
@@ -69,9 +67,9 @@ if __name__ == '__main__':
     ap.add_argument('--data_dir', default='./KuaiRand-Pure/data')
     ap.add_argument('--split', default='test', choices=['valid', 'test'])
     g = ap.add_mutually_exclusive_group(required=True)
-    g.add_argument('--make',  action='store_true', help='generate an example submission with the official FM baseline')
-    g.add_argument('--check', action='store_true', help='validate format + alignment only')
-    g.add_argument('--score', action='store_true', help='validate and score')
+    g.add_argument('--make',  action='store_true', help='用官方 FM baseline 生成示例提交')
+    g.add_argument('--check', action='store_true', help='只校验格式与对齐')
+    g.add_argument('--score', action='store_true', help='校验并打分')
     a = ap.parse_args()
 
     splits = load(a.data_dir)
@@ -98,10 +96,10 @@ if __name__ == '__main__':
                 if bad >= 4: break
         m.V, m.W, m.b = state
         write_submission(a.path, rows, m.predict(X))
-        print(f"wrote {a.path}: {len(rows):,d} rows, split={a.split}, official FM baseline")
+        print(f"已写出 {a.path}：{len(rows):,d} 行（split={a.split}，官方 FM baseline）")
     else:
         scores = read_submission(a.path, rows)
-        print(f"format+alignment check passed: {len(scores):,d} rows, split={a.split}")
+        print(f"✓ 格式与对齐校验通过：{len(scores):,d} 行，split={a.split}")
         if a.score:
             r = evaluate([x[1] for x in rows], [x[6] for x in rows], scores)
             print(f"  GAUC {r['GAUC']:.4f} | nDCG@5 {r['nDCG@5']:.4f} | primary {r['primary']:.4f}")

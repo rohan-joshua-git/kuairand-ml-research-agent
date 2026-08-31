@@ -44,6 +44,7 @@ import time
 
 from agent import compression_gate
 from agent.ablation import pick_highest_impact_block, run_ablation
+from agent.checkpoint import CheckpointManager, RunState
 from agent.code_editor import EDITABLE_FILES, apply_and_smoke_test, extract_code
 from agent.llm_client import TokenLedger, build_llm_client
 from agent.logger import IterationRecord, RunLogger
@@ -122,6 +123,9 @@ class Orchestrator:
             resource_usage_path=self.cfg["logging"]["resource_usage_report"],
         )
         self.pitfalls = PitfallStore(path=f"{self.cfg['logging']['run_log_dir']}/pitfalls.json")
+        self.checkpoint = CheckpointManager(
+            checkpoint_dir=self.cfg["logging"]["checkpoint_dir"], editable_files=EDITABLE_FILES
+        )
         self.retriever = SkillRetriever(
             tier1_path=agent_cfg["skill_store"]["tier1_path"],
             tier2_path=agent_cfg["skill_store"]["tier2_path"],
@@ -136,6 +140,45 @@ class Orchestrator:
         self._start_time = time.time()
         self._history: list[dict] = []  # this run's (hypothesis, target, delta, accepted) trail for the reflect prompt
 
+    def _save_checkpoint(self, iteration: int, iterations_without_improvement: int, best: RankingMetrics) -> None:
+        """Snapshot the editable files + run state after every accepted best, so
+        a crashed run resumes from the last known-good state instead of
+        restarting the iteration and wall-clock budget from zero. The organizer
+        confirmed (workshop Q&A 2026-08-31) that restarting a crashed process is
+        not a manual intervention, so this is the sanctioned way to survive an
+        API outage mid-run."""
+        self.checkpoint.save(
+            RunState(
+                iteration=iteration,
+                iterations_without_improvement=iterations_without_improvement,
+                best_score=best.primary,
+                best_metrics={"gauc": best.gauc, "ndcg_at_5": best.ndcg_at_5,
+                              "primary": best.primary, "n_users": best.n_users},
+                elapsed_hours_at_checkpoint=(time.time() - self._start_time) / 3600.0,
+                token_usage_by_model=self.ledger.as_dict(),
+                saved_at=time.time(),
+            )
+        )
+
+    def _resume_if_checkpointed(self) -> tuple[RankingMetrics, int, int] | None:
+        """Restores editable files + run state from a previous crashed run.
+        Returns (best_metrics, next_iteration, iterations_without_improvement)
+        or None when there is nothing to resume."""
+        if not self.checkpoint.exists():
+            return None
+        state = self.checkpoint.load_state()
+        self.checkpoint.restore_files()
+        bm = state.best_metrics
+        best = RankingMetrics(gauc=bm["gauc"], ndcg_at_5=bm["ndcg_at_5"],
+                              primary=bm["primary"], n_users=bm.get("n_users", 0))
+        # Charge already-spent wall-clock against the 6h ceiling, so a resumed
+        # run cannot exceed the budget by restarting the clock.
+        self._start_time = time.time() - state.elapsed_hours_at_checkpoint * 3600.0
+        self._resumed_from_checkpoint = True
+        print(f"[orchestrator] RESUMING from checkpoint: iteration {state.iteration}, "
+              f"best primary={best.primary:.4f}, {state.elapsed_hours_at_checkpoint:.2f}h already spent.")
+        return best, state.iteration, state.iterations_without_improvement
+
     def _history_block(self, limit: int = 8) -> str:
         if not self._history:
             return ""
@@ -148,6 +191,30 @@ class Orchestrator:
             )
         return "\n".join(lines)
 
+    def _log_initial_training(self, initial, best_metrics: RankingMetrics, official_baseline_valid_primary: float) -> None:
+        """Records the agent's starting editable pipeline as iteration 0 — the
+        reference every later delta is measured against."""
+        print(
+            f"[orchestrator] Initial agent model: GAUC={best_metrics.gauc:.4f}, "
+            f"nDCG@5={best_metrics.ndcg_at_5:.4f}, primary={best_metrics.primary:.4f}"
+            + (f" | unbiased probe primary={initial.unbiased_primary:.4f}" if initial.unbiased_primary is not None else "")
+        )
+        self.logger.log_iteration(
+            IterationRecord(
+                iteration=0,
+                timestamp=time.time(),
+                hypothesis="(initial editable-pipeline training, not an LLM hypothesis)",
+                code_diff_summary="Trained the agent's starting editable pipeline (pipeline/train.py as-is) to set the iteration-0 reference.",
+                metrics={
+                    "gauc": best_metrics.gauc,
+                    "ndcg_at_5": best_metrics.ndcg_at_5,
+                    "primary": best_metrics.primary,
+                    "unbiased_primary": initial.unbiased_primary,
+                    "delta_vs_official_baseline": best_metrics.primary - official_baseline_valid_primary,
+                },
+            )
+        )
+
     def run(self) -> None:
         official_baseline_valid_primary = self.cfg["starter_kit"]["official_baseline"]["valid"]["primary"]
 
@@ -158,6 +225,8 @@ class Orchestrator:
         # (also-computed) test-split number is logged for evidence only and
         # is never surfaced to the reflect/iterate prompts below — the
         # agent's decisions must never be informed by hidden-test scores.
+        resumed = self._resume_if_checkpointed()
+
         print("[orchestrator] Reproducing official baseline (starter_kit FM, k=16, lr=0.001)...")
         baseline_repro = reproduce_official_baseline(self.cfg)
         print(
@@ -184,32 +253,24 @@ class Orchestrator:
             )
         )
 
-        print("[orchestrator] Training initial agent pipeline (editable torch model, iteration 0)...")
-        initial = run_training_subprocess()
-        best_metrics = _as_ranking_metrics(initial)
-        print(
-            f"[orchestrator] Initial agent model: GAUC={best_metrics.gauc:.4f}, "
-            f"nDCG@5={best_metrics.ndcg_at_5:.4f}, primary={best_metrics.primary:.4f}"
-            + (f" | unbiased probe primary={initial.unbiased_primary:.4f}" if initial.unbiased_primary is not None else "")
-        )
-        self.logger.log_iteration(
-            IterationRecord(
-                iteration=0,
-                timestamp=time.time(),
-                hypothesis="(initial editable-pipeline training, not an LLM hypothesis)",
-                code_diff_summary="Trained the agent's starting editable pipeline (pipeline/train.py as-is) to set the iteration-0 reference.",
-                metrics={
-                    "gauc": best_metrics.gauc,
-                    "ndcg_at_5": best_metrics.ndcg_at_5,
-                    "primary": best_metrics.primary,
-                    "unbiased_primary": initial.unbiased_primary,
-                    "delta_vs_official_baseline": best_metrics.primary - official_baseline_valid_primary,
-                },
-            )
-        )
+        if resumed is not None:
+            best_metrics, resumed_iteration, resumed_no_improve = resumed
+            initial = None
+        else:
+            print("[orchestrator] Training initial agent pipeline (editable torch model, iteration 0)...")
+            initial = run_training_subprocess()
+            best_metrics = _as_ranking_metrics(initial)
+        if initial is not None:
+            self._log_initial_training(initial, best_metrics, official_baseline_valid_primary)
 
-        iterations_without_improvement = 0
-        iteration = 0
+
+        if resumed is not None:
+            iteration = resumed_iteration
+            iterations_without_improvement = resumed_no_improve
+        else:
+            iterations_without_improvement = 0
+            iteration = 0
+            self._save_checkpoint(iteration, iterations_without_improvement, best_metrics)
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -361,6 +422,7 @@ class Orchestrator:
                 if gate_result.passed:
                     best_metrics = new_metrics
                     iterations_without_improvement = 0
+                    self._save_checkpoint(iteration, iterations_without_improvement, best_metrics)
                     outcome = "accepted as new best (compression gate passed)"
                     print("[orchestrator] New best accepted (compression gate PASSED).")
                 else:

@@ -94,3 +94,9 @@ logging:
   run_log_dir: "./logs"
   intervention_log: "./logs/interventions.jsonl"
   resource_usage_report: "./logs/resource_usage.json"
+  # agent/checkpoint.py: snapshots the editable files + run state after every
+  # accepted best, so a crashed run resumes instead of restarting from zero.
+  # The organizer confirmed (workshop Q&A, 2026-08-31) that restarting a
+  # crashed process is NOT a manual intervention — only changing the agent's
+  # behaviour is — so automatic resume is both sanctioned and worth having.
+  checkpoint_dir: "./logs/checkpoint"

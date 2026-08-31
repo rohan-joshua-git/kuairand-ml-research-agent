@@ -34,6 +34,13 @@ class BlockVariant:
     block_name: str
     description: str
     kwargs_override: dict
+    # Hint for which editable file this block lives in. Routing of the actual
+    # code edit follows the HYPOTHESIS (orchestrator.route_target_file), not
+    # this field — the first live run proved block-name-derived routing sends
+    # a loss-function hypothesis to features.py, where a loss cannot be
+    # written. Kept because grid-growth rewrites of this file reference it and
+    # agent/ablation_smoke_test.py validates it against EDITABLE_FILES.
+    editable_target: str = "train"
 
 
 @dataclass
@@ -54,8 +61,8 @@ def default_block_variants() -> list[BlockVariant]:
     is a seed, not a fixed set.
     """
     return [
-        BlockVariant("training_schedule", "more epochs", {"epochs": 4}),
-        BlockVariant("learning_rate", "lower learning rate", {"epochs": ABLATION_EPOCHS_DEFAULT, "lr": 3e-4}),
+        BlockVariant("training_schedule", "more epochs", {"epochs": 4}, editable_target="train"),
+        BlockVariant("learning_rate", "lower learning rate", {"epochs": ABLATION_EPOCHS_DEFAULT, "lr": 3e-4}, editable_target="train"),
     ]
 
 

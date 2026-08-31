@@ -1,15 +1,15 @@
 """
-Loads KuaiRand-Pure interaction logs and applies the challenge's fixed,
-date-pinned split:
+Loads KuaiRand-Pure interaction logs and applies the official Starter Kit
+split (`starter_kit/data.py::SPLITS` — do not deviate from this, it's what
+the hidden-test scoring uses):
 
-    train      = 2022-04-08 .. 2022-04-21   (log_standard_4_08_to_4_21_pure.csv)
-    val + test = 2022-04-22 .. 2022-05-08   (log_standard_4_22_to_5_08_pure.csv)
-                 -> first half  = validation
-                 -> second half = HIDDEN test (never load this during dev)
+    train = 2022-04-08 .. 2022-04-21   (log_standard_4_08_to_4_21_pure.csv)
+    valid = 2022-04-22 .. 2022-04-28   (log_standard_4_22_to_5_08_pure.csv)
+    test  = 2022-04-29 .. 2022-05-08   (log_standard_4_22_to_5_08_pure.csv, HIDDEN — never load during dev)
 
 KuaiRand's standard interaction logs carry a `date` column (int, YYYYMMDD).
 This loader splits on that column rather than re-deriving dates from
-`time_ms`, since `date` is what the challenge brief's split is defined on.
+`time_ms`, since `date` is what the Starter Kit's split is defined on.
 """
 from __future__ import annotations
 
