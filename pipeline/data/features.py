@@ -6,10 +6,6 @@ each iteration (Figure 1 "engineer features" stage).
 agent's code diffs have one obvious place to land: it can add columns,
 change encodings, or swap out the whole body, and `ablation.py` can diff
 this file's contents across iterations to explain what changed.
-
-The starting implementation is deliberately minimal (id features + raw
-numeric signals) — it exists to make the pipeline run end-to-end from
-iteration 0, not to be a competitive feature set.
 """
 from __future__ import annotations
 
@@ -17,20 +13,25 @@ import pandas as pd
 
 from pipeline.data.leakage_guard import drop_leaky_columns
 
+# duration_ms is an ITEM property (video length) — known before exposure, safe.
+# play_time_ms, profile_stay_time, comment_stay_time, is_profile_enter are all
+# OUTCOMES of the impression being predicted (measured during/after the view),
+# so feeding them is label leakage, not modeling. Measured on real validation
+# data: play_time_ms corr 0.64 with long_view; comment_stay_time corr 0.17
+# (staying in the comments implies you long-viewed); profile_stay_time corr ~0
+# but same causal class. The official baseline's field list uses duration_ms
+# and none of the outcome fields — same conclusion.
 NUMERIC_SIGNAL_COLUMNS = [
-    "play_time_ms",
     "duration_ms",
-    "profile_stay_time",
-    "comment_stay_time",
 ]
 
 AUXILIARY_LABEL_COLUMNS = [
+    "is_click",
     "is_like",
     "is_follow",
     "is_comment",
     "is_forward",
     "is_hate",
-    "long_view",
 ]
 
 
@@ -39,7 +40,8 @@ def build_features(
     video_features: pd.DataFrame | None = None,
     allow_leaky_columns: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Joins interaction rows with (leakage-guarded) video/user features.
+    """Joins interaction rows with (leakage-guarded) video/user features and
+    sorts by user_id to support user-grouped pairwise loss (e.g. BPR / LambdaRank).
 
     Args:
         df: interaction log rows (train/val slice).
@@ -54,14 +56,17 @@ def build_features(
     if video_features is not None:
         vf_clean, dropped = drop_leaky_columns(video_features, allow_columns=allow_leaky_columns)
         if dropped:
-            # Left visible rather than silently swallowed — the orchestrator's
-            # logger should capture this as part of the iteration's diff summary.
             out.attrs["dropped_leaky_columns"] = dropped
         out = out.merge(vf_clean, on="video_id", how="left")
 
     for col in NUMERIC_SIGNAL_COLUMNS:
         if col in out.columns:
             out[col] = out[col].fillna(0)
+
+    # Sort interactions by user_id so user interactions form contiguous groups
+    # required for user-grouped pairwise BPR loss and ranking evaluation.
+    if "user_id" in out.columns:
+        out = out.sort_values(by="user_id", kind="stable").reset_index(drop=True)
 
     return out
 

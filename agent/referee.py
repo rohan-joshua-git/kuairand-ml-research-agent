@@ -19,10 +19,13 @@ that the agent is fitting the proxy, not the underlying task, and should
 trigger a reflect+revise course-correction rather than "keep going."
 
 Respects `config.referee.mode`:
-  - "tier_a"    train directly on the random log (requires organizer
-                confirmation it's permitted beyond diagnostics)
-  - "tier_b"    (default) use it only for propensity estimation / as a
-                held-out unbiased scoring probe, never for gradient updates
+  - "tier_a"    train directly on the random log — NOT sanctioned by the
+                Starter Kit (its README lists this file's confirmed use as
+                "extra validation, not training" — priority item 7), kept
+                only as a documented, disabled-by-default option
+  - "tier_b"    (default, confirmed correct) use it only for propensity
+                estimation / as a held-out unbiased scoring probe, never
+                for gradient updates
   - "disabled"  skip entirely (falls back to biased-validation-only, with
                 the compression gate as the sole overfitting guard)
 """
@@ -40,8 +43,7 @@ from pipeline.evaluate import RankingMetrics, compute_ranking_metrics
 class RefereeReport:
     biased_metrics: RankingMetrics
     unbiased_metrics: RankingMetrics
-    divergence_ndcg: float
-    divergence_recall: float
+    divergence_primary: float
     alert: bool
 
 
@@ -60,12 +62,15 @@ def score_against_unbiased_probe(
 ) -> RankingMetrics:
     """`scored_candidates` must be the model's predictions joined onto the
     random-exposure log rows (i.e. score every (user, video) pair that
-    appeared in log_random, using is_click from that log as the label).
+    appeared in log_random, using long_view from that log as the label —
+    same primary label as everywhere else, see pipeline/data/label.py).
     Because exposure was uniform-random, this is an unbiased estimate of
     ranking quality over the true item distribution, not just the
-    already-filtered biased-log distribution.
+    already-filtered biased-log distribution. The Starter Kit README
+    confirms this file's sanctioned use as exactly this: extra validation,
+    never training (priority item 7).
     """
-    return compute_ranking_metrics(scored_candidates, score_col=score_col, label_col="is_click")
+    return compute_ranking_metrics(scored_candidates, score_col=score_col, label_col="label")
 
 
 def build_referee_report(
@@ -79,16 +84,13 @@ def build_referee_report(
     biased = compute_ranking_metrics(biased_val_scored, label_col="label")
     unbiased = score_against_unbiased_probe(unbiased_probe_scored)
 
-    div_ndcg = biased.ndcg_at_10 - unbiased.ndcg_at_10
-    div_recall = biased.recall_at_50 - unbiased.recall_at_50
-
-    alert = div_ndcg > threshold or div_recall > threshold
+    div_primary = biased.primary - unbiased.primary
+    alert = div_primary > threshold
 
     return RefereeReport(
         biased_metrics=biased,
         unbiased_metrics=unbiased,
-        divergence_ndcg=div_ndcg,
-        divergence_recall=div_recall,
+        divergence_primary=div_primary,
         alert=alert,
     )
 

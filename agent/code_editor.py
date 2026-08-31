@@ -22,6 +22,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 EDITABLE_FILES = {
     "features": REPO_ROOT / "pipeline" / "data" / "features.py",
     "label": REPO_ROOT / "pipeline" / "data" / "label.py",
+    # The training surface: loss function, optimizer, model definition (a
+    # rewrite may define its own nn.Module inline), hyperparameters. Added
+    # because the organizer's #1-ranked lead (pairwise/listwise loss) lives
+    # here and the first live run proved the agent lands on exactly that
+    # hypothesis with no way to implement it. Contract a rewrite must keep:
+    # run_training(split=..., epochs=..., ...) -> TrainResult and
+    # score_dataframe(model, id_maps, feat_df) -> np.ndarray (both exercised
+    # by pipeline/smoke_test.py, so a contract break is caught pre-rollback).
+    "train": REPO_ROOT / "pipeline" / "train.py",
 }
 
 

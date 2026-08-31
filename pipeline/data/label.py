@@ -1,20 +1,28 @@
 """
-Play 3 (Label Archaeology): `is_click` is not one signal.
+Label resolution.
 
-Per the KuaiRand field spec, `is_click` means different things depending on
-which UI the interaction happened in (the `tab` field, range 0-14):
+The primary relevance label is `long_view` — confirmed by the organizer
+Starter Kit (`starter_kit/data.py` LABEL, `starter_kit/README.md` "Task
+definition"), NOT `is_click`. `resolve_label` below returns it directly.
+
+`is_click` is still relevant, but only as an AUXILIARY signal: the Starter
+Kit's own priority-ranked "where headroom is" list (item 3) names
+is_click/is_like/is_follow/is_comment/is_forward/play_time_ms as usable
+auxiliary tasks to help the long_view main task via multi-task learning
+(see `agent/skill_store/tier1_core.md`). Because `is_click` conflates two
+different user-behavior constructs depending on which UI the interaction
+happened in (the `tab` field, range 0-14):
 
   - Two-column UI: is_click is a genuine tap/click.
   - Single-column UI (main feed): is_click is actually `valid_play` —
     1 when play_time_ms >= duration_ms for videos under 7000ms, or when
     play_time_ms > 7000ms for longer videos.
 
-The challenge brief fixes "click" as the positive label without mentioning
-this split. Silently training on the raw column conflates two different
-user-behavior constructs. This module makes the distinction explicit,
-resolves a clean label, and *reports* the finding (this is meant to show up
-in the agent's run log as a discovered insight, not just get quietly
-patched).
+...an auxiliary head trained on the raw column conflates two different
+constructs. `resolve_auxiliary_click_label` below makes that split
+explicit so a multi-task auxiliary head trains on a clean signal, and
+`profile_label` reports the finding (this is meant to show up in the
+agent's run log as a discovered insight, not just get quietly patched).
 """
 from __future__ import annotations
 
@@ -22,7 +30,13 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+PRIMARY_LABEL_COLUMN = "long_view"
 DURATION_THRESHOLD_MS = 7000
+
+
+def resolve_label(df: pd.DataFrame) -> pd.Series:
+    """Returns the primary relevance label (long_view, 0/1) as float."""
+    return df[PRIMARY_LABEL_COLUMN].astype(float).copy()
 
 
 @dataclass
@@ -56,11 +70,13 @@ def profile_label(df: pd.DataFrame, two_column_tabs: set[int]) -> LabelProfile:
     )
 
 
-def resolve_label(df: pd.DataFrame, two_column_tabs: set[int], mode: str = "raw") -> pd.Series:
-    """Returns the resolved positive-label column.
+def resolve_auxiliary_click_label(df: pd.DataFrame, two_column_tabs: set[int], mode: str = "raw") -> pd.Series:
+    """Returns a resolved `is_click` column, for use as a multi-task
+    AUXILIARY head only (see module docstring) — never as the primary
+    training target, which is `resolve_label`/long_view.
 
     mode:
-      "raw"                -> just returns is_click unchanged (baseline-compatible)
+      "raw"                -> just returns is_click unchanged
       "click_only"         -> zero out rows in the single-column UI (keep only genuine clicks)
       "scenario_conditioned" -> keep is_click as-is but caller should train
                                  separate scenario-conditioned heads keyed on

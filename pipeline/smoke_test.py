@@ -14,8 +14,11 @@ from __future__ import annotations
 import json
 import sys
 
+import numpy as np
+
+from pipeline.data.features import build_features
 from pipeline.data.loader import load_config, load_split
-from pipeline.train import run_training
+from pipeline.train import run_training, score_dataframe
 
 
 def main() -> None:
@@ -27,9 +30,20 @@ def main() -> None:
     split.val = split.val.sample(n=min(2000, len(split.val)), random_state=0)
 
     result = run_training(split=split, epochs=1)
+
+    # The scoring contract (used by submit.py and the referee probe) must
+    # survive any patch too: one finite score per row, order preserved.
+    sample = build_features(split.val)
+    scores = score_dataframe(result.model, result.id_maps, sample)
+    assert len(scores) == len(sample), (
+        f"score_dataframe returned {len(scores)} scores for {len(sample)} rows — contract broken"
+    )
+    assert np.isfinite(scores).all(), "score_dataframe produced NaN/Inf scores — contract broken"
+
     metrics = {
-        "ndcg_at_10": result.val_metrics.ndcg_at_10,
-        "recall_at_50": result.val_metrics.recall_at_50,
+        "gauc": result.val_metrics.gauc,
+        "ndcg_at_5": result.val_metrics.ndcg_at_5,
+        "primary": result.val_metrics.primary,
     }
     print(f"SMOKE_TEST_METRICS: {json.dumps(metrics)}")
 

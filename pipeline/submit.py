@@ -1,42 +1,113 @@
 """
-Generates the final submission artifact.
+Generates the final submission artifact in the organizer's confirmed
+schema (`starter_kit/README.md` "Submission format"):
 
-The organizer-defined submission schema is a Day-1 blocker (see README /
-config.starter_kit.submission_schema_path) — this module raises loudly
-rather than guessing a schema and silently producing something that won't
-parse on the organizer's side. Wire the real writer in once the Starter
-Kit schema is confirmed; the TODO marks exactly where.
+    row_id,user_id,video_id,score
+
+Row order/`row_id` must match `starter_kit/data.py`'s `load()` exactly —
+read `log_standard_4_08_to_4_21_pure.csv` then
+`log_standard_4_22_to_5_08_pure.csv`, filtered by date, file order
+preserved. Rather than re-derive that ordering independently (and risk a
+silent misalignment that `--check` would catch too late), this module
+loads the canonical row list straight from the vendored `starter_kit.data`
+and writes with the vendored `starter_kit.submit.write_submission` — the
+same code the organizer's own `--make` path uses. It cross-checks that
+ordering against `pipeline.data.loader`'s pandas-loaded split before
+trusting it, since the model scores come from that DataFrame.
 """
 from __future__ import annotations
 
-import json
+import sys
 from pathlib import Path
 
-import torch
+import numpy as np
+import torch.nn as nn
 
-from pipeline.data.loader import load_config
+STARTER_KIT_DIR = Path(__file__).resolve().parents[1] / "starter_kit"
+if str(STARTER_KIT_DIR) not in sys.path:
+    sys.path.insert(0, str(STARTER_KIT_DIR))
+
+import data as _sk_data  # noqa: E402 — path insert above is required first
+import submit as _sk_submit  # noqa: E402
+
+from pipeline.data.features import build_features  # noqa: E402
+from pipeline.data.loader import load_config, load_split  # noqa: E402
 
 
-class SubmissionSchemaUnknown(RuntimeError):
+class SubmissionAlignmentError(RuntimeError):
     pass
 
 
-def write_submission(model: torch.nn.Module, id_maps: dict, out_path: str | Path) -> None:
-    cfg = load_config()
-    schema_path = cfg["starter_kit"].get("submission_schema_path")
-
-    if not schema_path:
-        raise SubmissionSchemaUnknown(
-            "config.starter_kit.submission_schema_path is not set. Obtain the "
-            "official submission schema from the organizer Starter Kit before "
-            "generating a real submission — see README 'Open Questions'. "
-            "(TODO: once the schema is known, replace this function body with "
-            "the actual writer — e.g. per-user top-K ranked candidate lists in "
-            "the organizer's specified format.)"
+def write_submission(
+    model: nn.Module,
+    id_maps: dict,
+    out_path: str | Path,
+    split: str = "valid",
+    allow_test: bool = False,
+    cfg: dict | None = None,
+) -> None:
+    """Writes a submission CSV for `split` ('valid' or 'test'). Generating a
+    'test' submission requires `allow_test=True` explicitly — same guard
+    philosophy as `pipeline.data.loader.load_split`, since test is hidden
+    during development and only the final scoring run should touch it.
+    """
+    if split == "test" and not allow_test:
+        raise ValueError(
+            "Generating a 'test' split submission requires allow_test=True. "
+            "Test is hidden during development — only the final, designated "
+            "submission run should set this."
         )
 
-    # Placeholder shape once a schema exists: swap this block for the real writer.
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump({"note": "placeholder — schema not yet wired"}, f)
+    cfg = cfg or load_config()
+    kit_splits = _sk_data.load(cfg["dataset"]["raw_dir"])
+    kit_rows = kit_splits[split]
+
+    our_split = load_split(cfg, allow_test=(split == "test"))
+    our_df = our_split.val if split == "valid" else our_split.test
+
+    if len(our_df) != len(kit_rows):
+        raise SubmissionAlignmentError(
+            f"pipeline.data.loader loaded {len(our_df)} rows for split={split!r}, "
+            f"starter_kit.data.load loaded {len(kit_rows)} — row-count mismatch, "
+            "would produce a misaligned submission."
+        )
+    our_uv = list(zip(our_df["user_id"].astype(str), our_df["video_id"].astype(str)))
+    kit_uv = [(x[1], x[2]) for x in kit_rows]
+    if our_uv != kit_uv:
+        first_bad = next(i for i, (a, b) in enumerate(zip(our_uv, kit_uv)) if a != b)
+        raise SubmissionAlignmentError(
+            f"Row order mismatch at index {first_bad}: pipeline.data.loader gave "
+            f"{our_uv[first_bad]}, starter_kit.data.load gave {kit_uv[first_bad]}. "
+            "Do not submit — row_id alignment is not guaranteed."
+        )
+
+    # build_features is agent-editable and MAY permute rows (it currently
+    # sorts by user_id for pairwise-loss grouping; the raw logs are NOT
+    # user-sorted — verified on real data). Scores must be written in
+    # kit_rows' original file order, so carry each row's original position
+    # through the feature build and un-permute the scores afterwards. This
+    # is the difference between a valid submission and one that silently
+    # passes --check with every score attached to the wrong row.
+    from pipeline.train import score_dataframe  # late import: use on-disk code
+
+    tagged = our_df.copy()
+    tagged["_orig_row_pos"] = np.arange(len(tagged))
+    feat_df = build_features(tagged)
+    if len(feat_df) != len(tagged) or set(feat_df["_orig_row_pos"]) != set(range(len(tagged))):
+        raise SubmissionAlignmentError(
+            "build_features added or dropped rows — cannot align scores to the "
+            "submission row order. Fix build_features to be row-preserving."
+        )
+    permuted_scores = score_dataframe(model, id_maps, feat_df)
+    scores = np.empty(len(tagged), dtype=np.float64)
+    scores[feat_df["_orig_row_pos"].to_numpy()] = permuted_scores
+
+    _sk_submit.write_submission(str(out_path), kit_rows, scores)
+
+
+def validate_submission(path: str | Path, split: str = "test", cfg: dict | None = None) -> None:
+    """Thin wrapper around the vendored `starter_kit.submit.read_submission`
+    — run this before treating any submission as final."""
+    cfg = cfg or load_config()
+    kit_splits = _sk_data.load(cfg["dataset"]["raw_dir"])
+    _sk_submit.read_submission(str(path), kit_splits[split])

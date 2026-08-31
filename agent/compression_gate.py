@@ -87,8 +87,11 @@ def run_compression_gate(
     )
     response = llm.reflect(system=REPRODUCER_SYSTEM_PROMPT, prompt=reproducer_prompt, max_tokens=512)
 
+    # Fail-closed parsing: an empty response or a first line containing FAIL
+    # is a rejection even if the word PASS also appears (e.g. "PASS or FAIL").
     first_line = response.text.strip().splitlines()[0] if response.text.strip() else ""
-    passed = "PASS" in first_line.upper()
+    upper = first_line.upper()
+    passed = "PASS" in upper and "FAIL" not in upper
 
     return CompressionGateResult(
         passed=passed,

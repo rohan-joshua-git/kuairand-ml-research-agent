@@ -16,8 +16,11 @@ env/
 logs/*
 !logs/.gitkeep
 
-# Processed data
+# Raw/processed data (downloadable via pipeline/data/download.py or starter_kit/README.md)
+data/raw/*.csv
 data/processed/
+starter_kit/KuaiRand-Pure/
+starter_kit/*.tar.gz
 
 # OS / editor
 .DS_Store

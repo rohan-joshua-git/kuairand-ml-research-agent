@@ -10,19 +10,23 @@ approach, which reached the strongest reported medal rate on MLE-bench Lite
 via targeted, ablation-guided refinement rather than tree search over whole
 solutions.
 
-Blocks are intentionally coarse-grained (feature set / label resolution /
-architecture width / training schedule) rather than line-level, because the
-point is to cheaply identify *which stage of Figure 1* to focus the next
-(expensive) LLM-driven code change on.
+Probes are genuinely reduced-scale (subsampled train, few epochs) and run
+in a subprocess (agent/subprocess_training.py) so they always execute the
+code currently on disk. Their absolute deltas vs the full-run best are
+therefore pessimistic — only the RELATIVE ordering between variants is
+meaningful, which is all pick_highest_impact_block uses. A variant that
+crashes (e.g. an agent rewrite of train.py dropped a kwarg a variant
+passes) is skipped and reported with its error, never fatal.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
 
-from pipeline.data.loader import KuaiRandSplit
+from agent.subprocess_training import TrainSubprocessError, run_training_subprocess
 from pipeline.evaluate import RankingMetrics
-from pipeline.train import run_training
+
+ABLATION_SUBSAMPLE_TRAIN = 300_000
+ABLATION_EPOCHS_DEFAULT = 2
 
 
 @dataclass
@@ -36,54 +40,68 @@ class BlockVariant:
 class AblationResult:
     block_name: str
     description: str
-    val_metrics: RankingMetrics
-    delta_ndcg: float
-    delta_recall: float
+    val_primary: float
+    delta_primary: float
+    error: str | None = None
 
 
 def default_block_variants() -> list[BlockVariant]:
     """A starting ablation grid over train.py's exposed knobs. The agent is
     expected to grow/replace this list over iterations as it introduces new
-    blocks (e.g. once a debiasing block or multitask head exists, add
-    variants that toggle them) — this function is a seed, not a fixed set.
+    blocks (e.g. once a pairwise-loss variant, a sequence-model block, or a
+    multitask head exists, add variants that toggle them, per the Starter
+    Kit's priority list in agent/skill_store/tier1_core.md) — this function
+    is a seed, not a fixed set.
     """
     return [
-        BlockVariant("label_resolution", "raw vs click_only label mode", {"label_mode": "click_only"}),
-        BlockVariant("training_schedule", "more epochs", {"epochs": 6}),
-        BlockVariant("learning_rate", "lower learning rate", {"lr": 3e-4}),
+        BlockVariant("training_schedule", "more epochs", {"epochs": 4}),
+        BlockVariant("learning_rate", "lower learning rate", {"epochs": ABLATION_EPOCHS_DEFAULT, "lr": 3e-4}),
     ]
 
 
 def run_ablation(
-    split: KuaiRandSplit,
     baseline_metrics: RankingMetrics,
     variants: list[BlockVariant] | None = None,
 ) -> list[AblationResult]:
-    """Trains one short run per variant and measures its delta against the
-    current baseline_metrics. Callers should use a reduced `epochs` in the
-    baseline run for this to stay cheap — ablation is meant to be a fast
-    signal, not a full training run per block.
+    """One cheap subprocess probe per variant, measured against the current
+    best full-run metrics. Deltas are pessimistic (subsampled probes score
+    below full runs) — compare variants to each other, not to zero.
     """
     variants = variants or default_block_variants()
     results = []
     for variant in variants:
-        train_result = run_training(split=split, **variant.kwargs_override)
-        m = train_result.val_metrics
-        results.append(
-            AblationResult(
-                block_name=variant.block_name,
-                description=variant.description,
-                val_metrics=m,
-                delta_ndcg=m.ndcg_at_10 - baseline_metrics.ndcg_at_10,
-                delta_recall=m.recall_at_50 - baseline_metrics.recall_at_50,
+        try:
+            probe = run_training_subprocess(
+                subsample_train=ABLATION_SUBSAMPLE_TRAIN,
+                no_referee=True,
+                timeout_s=900,
+                **variant.kwargs_override,
             )
-        )
+            results.append(
+                AblationResult(
+                    block_name=variant.block_name,
+                    description=variant.description,
+                    val_primary=probe.primary,
+                    delta_primary=probe.primary - baseline_metrics.primary,
+                )
+            )
+        except TrainSubprocessError as e:
+            results.append(
+                AblationResult(
+                    block_name=variant.block_name,
+                    description=variant.description,
+                    val_primary=float("nan"),
+                    delta_primary=float("-inf"),
+                    error=f"{e} | {e.output[-300:]}",
+                )
+            )
     return results
 
 
 def pick_highest_impact_block(results: list[AblationResult]) -> AblationResult:
-    """Per README/Tier-1 guidance: Recall@50 dominates the challenge's
-    absolute-delta scoring since it's numerically larger than NDCG@10, so
-    rank primarily on recall delta, using NDCG delta as a tiebreaker.
+    """Rank by delta on `primary` (mean of GAUC and nDCG@5) — the challenge's
+    actual scoring quantity (2.6 Judging Criteria), which for equal-weighted
+    metrics collapses to a plain difference of primaries. See
+    pipeline/evaluate.py:score_delta.
     """
-    return max(results, key=lambda r: (r.delta_recall, r.delta_ndcg))
+    return max(results, key=lambda r: r.delta_primary)

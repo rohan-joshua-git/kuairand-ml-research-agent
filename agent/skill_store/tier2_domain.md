@@ -19,13 +19,17 @@ wholesale every iteration.
 ## Multi-task / auxiliary-signal block
 
 - KuaiRand logs 12 feedback signals total (click, like, follow, comment,
-  forward, hate, long_view, ...) but only click is scored. Auxiliary-task
-  transfer is a documented way to squeeze more signal out of sparse click
-  labels.
+  forward, hate, long_view, ...) but only **long_view** is scored (the
+  primary label — see Tier 1). The other signals are usable only as
+  auxiliary tasks, per the Starter Kit's own priority-3 lead.
 - **ESMM (Entire Space Multi-task Model)**: jointly models CTR and CTCVR to
   avoid sample-selection bias between a click model and a downstream
-  conversion model. Adaptable here as click + a stronger engagement signal
-  (e.g. long_view) sharing a bottom tower.
+  conversion model. Adaptable here as click + long_view sharing a bottom
+  tower, with long_view as the head that's actually scored — note KuaiRand
+  logs long_view on every impression (not only clicked ones), so the
+  classic sample-selection-bias motivation for ESMM doesn't apply as
+  directly here; the transfer-learning benefit (shared representations)
+  is the part that still holds.
 - **PLE (Progressive Layered Extraction)**: separates task-shared and
   task-specific experts explicitly, reducing negative transfer between
   loosely-related auxiliary tasks compared to a naive shared-bottom MMoE.

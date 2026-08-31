@@ -1,18 +1,22 @@
 """
-PLACEHOLDER baseline — pending the organizer's official Starter Kit.
+The agent's EDITABLE architecture — not the scored baseline.
 
-The challenge rules are explicit: the agent is scored against the
-organizer-provided reference baseline, NOT a baseline it (or we) wrote
-ourselves. This module is a stand-in so the rest of the pipeline
-(train/evaluate/submit) has something real to run against during
-development. It must be swapped for the actual organizer baseline before
-any hidden-test submission is meaningful — see README "Open Questions".
+The organizer's actual reference baseline (FM, k=16, lr=0.001) is vendored
+verbatim in `starter_kit/baseline.py` and is what the agent must beat; it
+is reproduced directly (never reimplemented) by
+`pipeline/official_baseline.py`, called once at the start of every
+orchestrator run (Task Requirement #1). This module is the agent's own
+starting model — the thing the LLM-driven iteration loop actually rewrites
+and improves — not a stand-in for the organizer baseline.
 
 Architecture: a small embedding + MLP CTR model (user_id, video_id, tab,
-numeric signals -> click probability). This is a standard, unglamorous
+numeric signals -> long_view probability). This is a standard, unglamorous
 DeepFM-lite reference point, chosen because it's cheap to train and gives
 the agent's ablation loop (agent/ablation.py) an obvious set of blocks to
-improve on: embeddings, feature crosses, the MLP tower, the loss.
+improve on: embeddings, feature crosses, the MLP tower, the loss. Per the
+Starter Kit's own priority list (agent/skill_store/tier1_core.md), the
+highest-leverage first moves are a pairwise/listwise loss and sequence
+modeling, not architecture swaps.
 """
 from __future__ import annotations
 
