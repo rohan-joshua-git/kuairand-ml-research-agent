@@ -174,6 +174,124 @@ Monotonically **declining**. The hypothesis that k=16 imposes a limiting rank on
 the interaction matrix is refuted, not merely unsupported. Weight decay: 1e-6
 (the existing default) is at least as good as 1e-5, which beats 1e-4.
 
+#### 5.2.1 Field-specific weight decay on `user_id` — tested, negative
+
+The strongest remaining regularisation hypothesis, and the first experiment run
+under the selection/confirmation protocol (section 2.4). Motivation was three
+converging measurements: user x video affinity is chance yet deleting `user_id`
+costs -0.0091; every two-way `user x context` encoding scores below the context
+alone; and global capacity reduction helps. Global weight decay applies the same
+shrinkage to a video embedding backed by ~150 impressions and a user embedding
+backed by ~50, which is almost certainly wrong.
+
+Implemented as an explicit L2 on the `user_id` rows of the shared embedding
+table, in Adam's own units (penalty `0.5 * wd * ||W_user||^2`, gradient
+`wd * W_user`). Only the k-dim rows are penalised, not the first-order `linear`
+rows — a per-user constant added to the logit provably cannot change a
+within-user ranking. 3 seeds per arm, early-stopped on the selection half:
+
+| user_wd | 0 | 1e-6 | 1e-5 | 1e-4 | 1e-3 | 1e-2 |
+|---|---|---|---|---|---|---|
+| selection primary | 0.6078 | 0.6078 | 0.6077 | 0.6070 | 0.6052 | 0.6021 |
+| vs control | — | -0.0000 | -0.0001 | -0.0008 | -0.0026 | -0.0058 |
+
+Std <= 0.0004 throughout. **Monotonically harmful across five orders of
+magnitude.** The confirmation half was not looked at, because nothing beat the
+control on selection — the look is preserved.
+
+This is a directional result, not a noisy null. The prediction was that shrinking
+a noise-fitting embedding should help; it does the reverse, monotonically. So the
+global-`k` anomaly does **not** transfer to user-specific regularisation, and
+section 6.4's conclusion sharpens: whatever `user_id` contributes is not
+excess capacity that regularisation can trim. What it *is* remains the open
+question — see 5.2.2.
+
+#### 5.2.2 What `user_id` actually contributes — identity, not capacity
+
+Section 6.4 left the mechanism explicitly `NOT_IDENTIFIABLE`: deleting `user_id`
+costs -0.0091 while every affinity measurement reads chance, and two explanations
+(per-user function reshaping versus simple parameter count) were not separated.
+They are now separated, by a three-arm control at 3 seeds:
+
+| arm | full primary | vs real |
+|---|---|---|
+| real | 0.6046 | — |
+| shuffled | 0.5953 | **-0.0093** |
+| removed | 0.5960 | -0.0086 |
+
+`shuffled` permutes the user codes ACROSS ROWS in every split. It holds parameter
+count, MLP input width and the exact code-frequency distribution fixed, and
+destroys only the correspondence between a row and its true user. Design note:
+the permutation must be row-level. A *bijective* remap of user -> embedding row
+is a symmetry of the model and trains to a numerically identical result, so it
+would have produced a spurious null.
+
+Attribution: identity **+0.0093 (108%)**, capacity **-0.0007 (-8%)**. Random user
+embeddings are marginally *worse* than no user embedding, which is what injecting
+noise into the MLP input should do. **The capacity explanation is refuted.**
+
+This also resolves the caveat recorded in section 6.4 and in tier1_core, that
+"dropping a field also shrinks the MLP input, so part of the -0.0091 is capacity
+rather than user signal". `shuffled` holds the input width fixed and still loses
+the whole effect, so the capacity share is -0.0007 — negligible and, if anything,
+negative.
+
+**Is it memorisation?** Stratified by training impressions per user, against
+`removed` as the clean reference:
+
+| train impressions | users | vs removed | noise band |
+|---|---|---|---|
+| 1 | 708 | +0.0062 | +/-0.0045 |
+| 2-5 | 1,218 | +0.0076 | +/-0.0034 |
+| 6-15 | 3,519 | +0.0048 | +/-0.0020 |
+| 16-40 | 7,158 | +0.0080 | +/-0.0014 |
+| 41+ | 9,774 | +0.0102 | +/-0.0012 |
+
+Partly. The gain does rise toward the frequent users (+0.0102 at 41+, the most
+precisely measured bin), which is memorisation-like. But it is not monotone —
+the 6-15 bin dips to +0.0048 — and, more importantly, there is a substantial
+**floor at a single training impression** (+0.0062, above its own noise band).
+Pure per-user rate memorisation cannot produce that: one observation does not
+estimate a rate. So the honest reading is a mixture, with a transferable
+component that survives at minimal per-user data.
+
+Method note: the first run of this stratification used `shuffled` as the
+reference and reported +0.0097 in the 1-impression bin. That was confounded —
+shuffling preserves the frequency distribution while reassigning rows, so a rare
+user can receive a heavily-trained embedding belonging to a frequent user, which
+is misleading input rather than absent input and inflates exactly the
+low-frequency bins the conclusion rests on. Re-run against `removed`, those bins
+fell 30-40%. The corrected numbers are the ones above.
+
+#### 5.2.3 Temporal distribution shift — looked for, not present
+
+The temporal MODEL family is dead because `upload_dt` has three distinct values
+(section 4). Temporal *distribution shift* is a separate question and had never
+been tested on the absolute curve — only on the mlp-only delta in section 9.
+
+The naive version of this diagnostic is a trap. Model primary really does fall
+across the validation week, 0.5464 on 4/22 to 0.5330 on 4/28, which reads as
+drift. It is not. Every day was also scored with a model-free reference: a
+smoothed train-fit video-quality prior, frozen from train and therefore
+incapable of drifting. It falls in lockstep.
+
+| block | dates | rows | model | prior ref | gap |
+|---|---|---|---|---|---|
+| early | 04-22..04-24 | 67,168 | 0.5833 | 0.5635 | +0.0198 |
+| middle | 04-25..04-26 | 29,441 | 0.5493 | 0.5304 | +0.0189 |
+| late | 04-27..04-28 | 28,300 | 0.5504 | 0.5298 | **+0.0206** |
+
+Gap change early -> late: **+0.0008**, i.e. flat to slightly widening. The
+declining level is day difficulty; the model's learned advantage does not decay.
+**Recency weighting stays closed** — it was already null (half-life 14d/7d both
+0.6389 vs uniform 0.6387, 2d hurts at 0.6342), and there is now no drift for it
+to correct.
+
+Reading note: per-day primaries (~0.53) are far below the full-week 0.6047
+because slicing by day leaves most users 1-2 impressions, so GAUC excludes them
+and nDCG@5 degenerates. The levels are not comparable across slicings; only the
+model-vs-reference gap within a slice is.
+
 ### 5.3 Architecture and ensembling
 
 | model | single | 3-seed rank-avg |
@@ -285,6 +403,56 @@ that can change a within-user ranking when a per-user constant cannot.
 `NOT_IDENTIFIABLE` so far: the precise mechanism. Two candidate explanations
 (per-user function reshaping versus simple parameter count) are not yet
 separated.
+
+---
+
+### 6.5 The label-oracle ceiling is not an attainable model ceiling
+
+Terminology first, because the distinction is the whole point. 0.8645 is the
+organizer's published **label-oracle ceiling**: the score obtained by ranking
+with the true labels. It is a real and correctly computed ceiling for the
+metric. What it is NOT is an attainable ceiling for any *probabilistic model*,
+and conflating the two invites a natural but wrong reading: we sit at ~0.605,
+the ceiling is 0.865, therefore a quarter of the metric is sitting unclaimed.
+That inference is testable rather than arguable.
+
+Method. Calibrate the champion's averaged probabilities with isotonic
+regression, giving `q` = P(long_view | features) (calibration check: mean
+predicted 0.3133 vs actual rate 0.3133). Then SIMULATE a world in which the
+model is exactly right: draw `y ~ Bernoulli(q)`. In that world there is no
+learnable structure left by construction. Score both the model and a
+label-revealing oracle against those simulated labels.
+
+| | primary |
+|---|---|
+| perfect-probability model vs simulated labels | 0.5915 |
+| label ORACLE vs simulated labels | 0.8471 |
+| **irreducible gap from pure coin-flip noise** | **0.2556** |
+| | |
+| our model vs real labels | 0.6053 |
+| oracle vs real labels | 0.8484 |
+| **observed gap** | **0.2431** |
+
+**The observed gap is smaller than the gap a perfect model faces in a world
+with nothing left to learn.** The oracle sees each impression's realised label;
+a long_view is a coin flip, and no probability model can order a 0.31-chance
+item that came up 1 above a 0.30-chance item that came up 0. That single fact
+accounts for the entire 0.2556.
+
+What this does and does not establish. It does NOT prove no signal remains — if
+the model is missing structure then `q` is not the true probability and the
+simulation is optimistic about how little is left. Nor does it impugn the
+organizer's figure, which is exactly what it claims to be. What it establishes
+is narrower and still useful: **the label-oracle ceiling is not an attainable
+probabilistic-model ceiling, so the size of the gap to it is not evidence for
+remaining headroom.** Anyone arguing from "0.8645 minus 0.605 is huge" has to
+make the case some other way.
+
+Scale note: 0.4753 / 0.5946 / 0.8645 are TEST-set figures; 0.6053 is a
+VALIDATION figure. Mixing them inflates the apparent progress. On the
+validation scale (random 0.4841, oracle 0.8484, both measured here) the
+baseline captures 32.3% of the attainable range and this model 33.3% — about
+one point, not the ~2.7 that mixing scales suggests.
 
 ---
 

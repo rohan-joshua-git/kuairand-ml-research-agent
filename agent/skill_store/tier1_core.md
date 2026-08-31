@@ -31,9 +31,17 @@ by `retriever.py` only when the current ablation target calls for it.
   improvement on the agent's own best checkpoint). Hard cap 50 iterations
   / 6h wall-clock.
 - You are scored once, on the validation-best checkpoint at convergence,
-  on the hidden test set. A checkpoint that scores well on validation but
-  doesn't generalize is worse than useless — see `agent/compression_gate.py`
-  and use it before designating anything final.
+  on the hidden test set. Organizer FAQ 2.9.1(c) makes that unconditional:
+  the validation-best checkpoint is what ships. `agent/compression_gate.py`
+  therefore runs as an ADVISORY signal — a failed gate is recorded as a
+  pitfall and fed to the next reflect step, but it never vetoes a checkpoint.
+- **Before believing any candidate, use `pipeline/eval_protocol.py`.** It
+  splits validation into a SELECTION half and a CONFIRMATION half by user
+  hash (fixed salt, ~11.3k / ~11.1k users), and its per-user decomposition of
+  GAUC/nDCG@5 matches `starter_kit/evaluate.py` to 1.6e-14, which is what
+  makes the user-level bootstrap exact. Rules: explore only on selection,
+  early-stop only on selection, spend a confirmation look only after a
+  candidate has already won, and never report a gain under 0.001.
 
 ## Already tried (organizer-run, ~free signal — don't re-spend iterations here)
 
@@ -95,7 +103,12 @@ size" as a first move — it's a measured dead end, not a guess.**
    training.** Confirmed sanctioned use (`config.referee.mode: tier_b`) —
    an unbiased-exposure probe to check whether a checkpoint is overfitting
    the biased standard-log validation split, not a training source.
-   `tier_a` (training on it) is NOT sanctioned.
+   `tier_a` (training on it) is NOT sanctioned. **The probe is now
+   restricted to the validation window (4/22-4/28) by default** —
+   `load_random_exposure_log(window="val")` — because 75.7% of the raw file
+   falls inside the hidden-test window and the probe's divergence is
+   surfaced to the reflect step. `window="full"` exists for standalone EDA
+   only (FAQ 2.9.2) and must never be called from the loop.
 
 ## Dataset-specific traps
 
@@ -121,14 +134,20 @@ size" as a first move — it's a measured dead end, not a guess.**
    `date`). `pipeline/data/features.py:NUMERIC_SIGNAL_COLUMNS` encodes
    this. Do not add any `*_stay_time` / `is_profile_enter` / `play_time_ms`
    column back as an input.
-4. **Row order is a submission-correctness invariant.** The raw logs are
+4. **`starter_kit/submit.py --check` CRASHES ON SUCCESS on Windows.** The
+   success line prints a U+2713 check mark, which cp1252 cannot encode, so the
+   validator raises UnicodeEncodeError *after* every check has already passed.
+   The traceback is not a validation failure. Always run it as
+   `PYTHONIOENCODING=utf-8 python submit.py --check ...` and confirm exit 0 —
+   both current artifacts pass (124,909 valid / 170,588 test rows).
+5. **Row order is a submission-correctness invariant.** The raw logs are
    NOT sorted by user_id (verified on real data). `build_features` may
    permute rows (it sorts by user_id for pairwise grouping) —
    `pipeline/submit.py` un-permutes scores back to file order via an
    explicit position column, and `pipeline/train.py:score_dataframe` must
    keep returning one score per input row in input order. Breaking either
    silently produces a misaligned submission that still passes `--check`.
-5. **KuaiRand-Pure is the debiasing/multi-task variant**, not the
+6. **KuaiRand-Pure is the debiasing/multi-task variant**, not the
    sequential-modeling variant (that's 27K/1K) — but per priority item 2
    above, sequence modeling on Pure's own within-split history is still an
    organizer-flagged unexplored lead, not the same thing as "use the
@@ -211,6 +230,16 @@ group-wise calibration can, and only for users whose candidates span groups.
    look for context that changes across a user's impressions rather than more
    user attributes.
 
+**0.8645 IS THE LABEL-ORACLE CEILING, NOT AN ATTAINABLE MODEL CEILING.** Simulating
+`y ~ Bernoulli(q)` with the calibrated champion (so zero signal remains by
+construction), the label oracle still beats the perfect-probability model by
+**0.2556**. Our observed model-to-oracle gap is **0.2431** — SMALLER. A
+long_view is a coin flip; an oracle that sees the realised label wins by that
+margin no matter how good the model is. Also: 0.4753/0.5946/0.8645 are TEST
+figures — do not compare a validation score against them. On the validation
+scale (random 0.4841, oracle 0.8484) baseline = 32.3% of attainable range,
+champion = 33.3%.
+
 **Per-user candidate lists are tiny**: median 4 impressions, 63.7% of users
 have <= 5. So nDCG@5 is effectively full-list nDCG for most users, and there
 is little room for clever re-ordering.
@@ -220,7 +249,9 @@ is little room for clever re-ordering.
 window**, and its long_view rate is 0.0850 versus 0.3133 in the standard log
 (uniform exposure shows users mostly irrelevant videos). Training on it means
 both test-period contamination and a train/serve distribution mismatch. Its
-sanctioned use is the unbiased probe, which is how `agent/referee.py` uses it.
+sanctioned use is the unbiased probe, which is how `agent/referee.py` uses it
+— and as of the protocol pass, the probe reads only the 288,338 rows in the
+VALIDATION window, so the 897,721 test-window rows never reach the loop at all.
 This also explains why the referee's absolute divergence is always large
 (~0.19-0.24): the two splits have structurally different label distributions,
 so only the CHANGE in divergence across iterations is informative.
@@ -433,6 +464,26 @@ quality all are +0.0001..+0.0003, and `qb x tab x pooled-tag` (0.6534) is BELOW
 `qb x tab` (0.6554). There is no combinatorial tag structure to recover, so
 attention pooling has nothing to find that mean pooling missed.
 
+**Field-specific weight decay on `user_id` is HARMFUL — tested, do not retry.**
+3 seeds per arm, early-stopped on the selection half, explicit L2 on the user
+rows of the embedding table in Adam's units. selection primary: wd=0 0.6078 /
+1e-6 0.6078 / 1e-5 0.6077 / 1e-4 0.6070 / 1e-3 0.6052 / 1e-2 0.6021 (std
+<=0.0004). Monotone decline over five orders of magnitude. The "user embedding
+is fitting noise, so shrink it" hypothesis predicted the opposite sign and is
+refuted. Whatever `user_id` contributes, it is not trimmable excess capacity.
+
+**`user_id` is IDENTITY, not capacity — mechanism settled, do not re-litigate.**
+Three arms, 3 seeds: real 0.6046 / shuffled 0.5953 / removed 0.5960. `shuffled`
+permutes user codes across rows (same parameters, same input width, same code
+frequencies, no identity) and loses the ENTIRE effect: identity +0.0093 (108%),
+capacity -0.0007 (-8%). This also retires the old caveat that part of the
+-0.0091 was the MLP input shrinking — it is not. Stratified against `removed`,
+the gain rises with training frequency (+0.0062 at 1 impression -> +0.0102 at
+41+) but is non-monotone and has a real floor at ONE training impression, so it
+is not pure rate memorisation. If you build a user-side control, the permutation
+must be ROW-LEVEL: a bijective user->row remap is a model symmetry and trains to
+an identical result, producing a fake null.
+
 **Embedding width: smaller is better, not larger.** 2-seed sweep at
 weight_decay 1e-6: k=8 **0.6050**, k=16 0.6046, k=32 0.6046; weight decay
 1e-5 0.6047 and 1e-4 0.6045 at k=16. The model is over-parameterised, not
@@ -468,6 +519,13 @@ impression count in train 0.5396, the same count computed on the evaluation
 split itself 0.5189, against the train quality prior at 0.6387. There is
 therefore no reason to go near transductive eval-set statistics: the causal
 feature strictly dominates the gray-area one.
+
+**No temporal distribution shift across validation — measured with a control.**
+Model primary falls 0.5464 (4/22) -> 0.5330 (4/28), which LOOKS like drift, but a
+frozen train-fit video prior falls in lockstep. Model-minus-reference gap:
++0.0198 early / +0.0189 middle / +0.0206 late, change +0.0008. The decline is day
+difficulty, not model decay. Do not reopen recency weighting on the strength of a
+falling raw curve — always score a frozen reference on the same days.
 
 **Temporal drift is not exploitable.** The `x date` oracle above looks like
 drift but is the oracle memorising validation labels in tiny cells.

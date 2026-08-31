@@ -167,6 +167,12 @@ class TrainResult:
     id_maps: dict
     val_metrics: RankingMetrics
     epoch_losses: list[float] = field(default_factory=list)
+    # Raw validation predictions, in val-frame row order, so pipeline/eval_protocol.py
+    # can re-aggregate over any user subset (selection / confirmation half, bootstrap
+    # resample) without a second scoring pass.
+    val_scores: np.ndarray | None = None
+    val_user_ids: np.ndarray | None = None
+    val_labels: np.ndarray | None = None
 
 
 class FactorizationMachineWithMLP(nn.Module):
@@ -280,7 +286,9 @@ def _dur_bucket(duration_ms: pd.Series, edges: np.ndarray) -> np.ndarray:
     return np.searchsorted(edges, duration_ms.fillna(0).to_numpy())
 
 
-def _build_id_maps(train_df: pd.DataFrame, cross_te: dict | None = None) -> dict:
+def _build_id_maps(train_df: pd.DataFrame, cross_te: dict | None = None,
+                   drop_fields: set[str] | None = None,
+                   shuffle_fields: dict[str, int] | None = None) -> dict:
     """Per-field vocabularies with a trailing UNK slot, plus global offsets so
     every field's values occupy a disjoint range of one shared table — same
     scheme as starter_kit/data.py::encode."""
@@ -292,6 +300,8 @@ def _build_id_maps(train_df: pd.DataFrame, cross_te: dict | None = None) -> dict
     _add_cross_te_buckets(frame, cross_te)
 
     fields = resolve_fields(frame)
+    if drop_fields:
+        fields = [f for f in fields if f not in drop_fields]
     vocabs, dims = {}, []
     for fieldname in fields:
         values = frame[fieldname].astype(str).unique() if fieldname in frame.columns else np.array([], dtype=str)
@@ -307,6 +317,13 @@ def _build_id_maps(train_df: pd.DataFrame, cross_te: dict | None = None) -> dict
         "total_dim": int(sum(dims)),
         "dur_edges": edges,
         "cross_te": cross_te,
+        # {field: seed} — _encode permutes that field's codes ACROSS ROWS with a
+        # seeded RNG. This is the memorisation control: it preserves cardinality
+        # and the exact code-frequency distribution while destroying the link
+        # between a row and its true entity. A *bijective* code remap would not
+        # work: relabelling embedding rows is a symmetry of the model and trains
+        # to an identical result.
+        "shuffle_fields": dict(shuffle_fields or {}),
     }
 
 
@@ -326,6 +343,9 @@ def _encode(df: pd.DataFrame, id_maps: dict) -> np.ndarray:
             codes = frame[fieldname].astype(str).map(vocab).fillna(unk).to_numpy(dtype=np.int64)
         else:
             codes = np.full(len(frame), unk, dtype=np.int64)
+        shuffle_seed = id_maps.get("shuffle_fields", {}).get(fieldname)
+        if shuffle_seed is not None:
+            codes = np.random.default_rng(shuffle_seed).permutation(codes)
         columns.append(codes + offset)
     return np.stack(columns, axis=1)
 
@@ -343,7 +363,38 @@ def run_training(
     patience: int = 3,
     embed_dim: int = 16,
     weight_decay: float = 1e-6,
+    user_weight_decay: float = 0.0,
+    early_stop_mask: np.ndarray | None = None,
+    user_id_mode: str = "real",
 ) -> TrainResult:
+    """`user_weight_decay` adds decay on the `user_id` rows of the shared
+    embedding table, ON TOP OF the global `weight_decay` (Adam applies decay
+    per-tensor, and the user rows live inside one shared table, so they cannot
+    be excluded from the global term). It is expressed in Adam's own units: the
+    penalty is 0.5 * wd * ||W_user||^2, whose gradient is wd * W_user, matching
+    what `weight_decay` adds to the gradient.
+
+    Only the k-dim `embedding` rows are penalised, not the first-order `linear`
+    rows: a per-user constant added to the logit provably cannot change a
+    within-user ranking, so decaying it could not move GAUC or nDCG.
+
+    `early_stop_mask` is a boolean mask over validation ROWS used for the
+    early-stopping metric. Pass the selection half during a sweep so held-out
+    confirmation users never participate in model selection. None = all rows
+    (the shipped default).
+
+    `user_id_mode` decomposes what the user embedding contributes:
+      "real"     — shipped model.
+      "shuffled" — user codes permuted across rows in every split. Same
+                   parameter count, same code-frequency distribution, zero
+                   user identity. If this matches "real", the embedding is
+                   pure capacity; if it matches "removed", identity is the
+                   whole story. The `user_id` COLUMN is untouched, so metric
+                   grouping still uses each row's true user.
+      "removed"  — user_id dropped from the encoded field list entirely.
+    """
+    if user_id_mode not in ("real", "shuffled", "removed"):
+        raise ValueError(f"user_id_mode must be real/shuffled/removed, got {user_id_mode!r}")
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -365,7 +416,13 @@ def run_training(
     for name, values in cross_oof.items():
         train_feat[name] = values
 
-    id_maps = _build_id_maps(train_feat, cross_state)
+    id_maps = _build_id_maps(
+        train_feat, cross_state,
+        drop_fields={"user_id"} if user_id_mode == "removed" else None,
+        # Distinct seeds per split so the permutations are independent; both are
+        # derived from `seed` so the whole arm stays reproducible.
+        shuffle_fields={"user_id": 90_000 + seed} if user_id_mode == "shuffled" else None,
+    )
 
     x_train = torch.tensor(_encode(train_feat, id_maps), dtype=torch.long)
     y_train = torch.tensor(y_np, dtype=torch.float32)
@@ -384,6 +441,18 @@ def run_training(
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     loss_fn = nn.BCEWithLogitsLoss()
 
+    user_slice = None
+    if user_weight_decay > 0.0:
+        if "user_id" not in id_maps["fields"]:
+            raise ValueError("user_weight_decay set but user_id is not an encoded field")
+        _lo = id_maps["offsets"]["user_id"]
+        _hi = _lo + len(id_maps["vocabs"]["user_id"]) + 1  # +1 UNK slot
+        user_slice = (_lo, _hi)
+
+    es_mask = None if early_stop_mask is None else np.asarray(early_stop_mask, dtype=bool)
+    if es_mask is not None and len(es_mask) != len(val_feat):
+        raise ValueError(f"early_stop_mask has {len(es_mask)} rows, val has {len(val_feat)}")
+
     generator = torch.Generator().manual_seed(seed)
     n = len(y_train)
     epoch_losses: list[float] = []
@@ -397,6 +466,9 @@ def run_training(
             idx = permutation[start:start + batch_size]
             optimizer.zero_grad()
             loss = loss_fn(model(x_train[idx].to(device)), y_train[idx].to(device))
+            if user_slice is not None:
+                w_user = model.embedding.weight[user_slice[0]:user_slice[1]]
+                loss = loss + 0.5 * user_weight_decay * (w_user ** 2).sum()
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
@@ -405,7 +477,7 @@ def run_training(
 
         # Early stopping on the competition's own primary metric, not on loss —
         # the same rule (patience on validation primary) the official baseline uses.
-        metrics = _evaluate(model, val_feat, id_maps, val_label, device)
+        metrics = _evaluate(model, val_feat, id_maps, val_label, device, row_mask=es_mask)
         if metrics.primary > best_primary + 1e-5:
             best_primary = metrics.primary
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
@@ -418,18 +490,29 @@ def run_training(
     if best_state is not None:
         model.load_state_dict(best_state)
 
+    final_scores = score_dataframe(model, id_maps, val_feat, device=device)
+    final_eval = val_feat[["user_id"]].copy()
+    final_eval["score"] = final_scores
+    final_eval["label"] = val_label.to_numpy()
+
     return TrainResult(
         model=model,
         id_maps=id_maps,
-        val_metrics=_evaluate(model, val_feat, id_maps, val_label, device),
+        val_metrics=compute_ranking_metrics(final_eval),
         epoch_losses=epoch_losses,
+        val_scores=final_scores,
+        val_user_ids=val_feat["user_id"].to_numpy(),
+        val_labels=val_label.to_numpy(),
     )
 
 
-def _evaluate(model: nn.Module, feat_df: pd.DataFrame, id_maps: dict, label: pd.Series, device: str) -> RankingMetrics:
+def _evaluate(model: nn.Module, feat_df: pd.DataFrame, id_maps: dict, label: pd.Series, device: str,
+              row_mask: np.ndarray | None = None) -> RankingMetrics:
     eval_df = feat_df[["user_id"]].copy()
     eval_df["score"] = score_dataframe(model, id_maps, feat_df, device=device)
     eval_df["label"] = label.to_numpy()
+    if row_mask is not None:
+        eval_df = eval_df[row_mask]
     return compute_ranking_metrics(eval_df)
 
 
