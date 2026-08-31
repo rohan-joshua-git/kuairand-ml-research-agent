@@ -414,7 +414,25 @@ class Orchestrator:
                 f"delta vs official baseline={delta_vs_official_baseline:+.4f}) | {referee_note}"
             )
 
-            is_new_best = delta > self.epsilon
+            # TWO SEPARATE RULES, deliberately decoupled.
+            #
+            # Acceptance: ANY improvement over the current best becomes the new
+            # best. FAQ 2.9.1(c) says the scored submission is the
+            # validation-best checkpoint at the point the run stops, so using
+            # epsilon to REJECT a higher-scoring checkpoint discards the very
+            # thing the rule asks us to ship.
+            #
+            # Convergence: epsilon still governs the plateau window. A gain
+            # smaller than epsilon is accepted as the new best but does NOT
+            # reset the patience counter, so the run still converges on schedule.
+            #
+            # The graded run predates this separation and DID reject a better
+            # checkpoint: iteration 6 scored 0.60496 against an accepted best of
+            # 0.60449 (delta +0.00046 < epsilon) and was rolled back, so the
+            # shipped model is the second-best by about +0.0005. That is
+            # disclosed in README.md and flagged in docs/results_table.md.
+            is_new_best = delta > 0.0
+            clears_epsilon = delta > self.epsilon
             outcome = ""
 
             if is_new_best:
@@ -428,7 +446,11 @@ class Orchestrator:
                     self.llm, hypothesis=hypothesis, code_diff_summary=f"Modified {editable_target}.py per hypothesis above.", cfg=self.cfg
                 )
                 best_metrics = new_metrics
-                iterations_without_improvement = 0
+                # Only a gain that clears epsilon resets the plateau window.
+                if clears_epsilon:
+                    iterations_without_improvement = 0
+                else:
+                    iterations_without_improvement += 1
                 self._save_checkpoint(iteration, iterations_without_improvement, best_metrics)
 
                 if gate_result.passed:

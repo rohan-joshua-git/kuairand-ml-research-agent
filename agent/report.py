@@ -94,7 +94,7 @@ def generate_results_table(cfg: dict | None = None) -> str:
         # artifact itself: the artifact is a 10-seed rank-average of that code
         # state (see "Final submission" below), which scores higher than any
         # single checkpoint here. Labelling this row "submitted" would name a
-        # 0.6045 checkpoint as the 0.6053 deliverable.
+        # 0.6045 checkpoint as the ensemble deliverable.
         marker = " **<- accepted best (the code state that ships)**" if row_index == best_row else ""
         if row_index != best_row and isinstance(m.get("primary"), (int, float)) and best_row is not None:
             best_primary = iterations[best_row].get("metrics", {}).get("primary")
@@ -121,16 +121,41 @@ def generate_results_table(cfg: dict | None = None) -> str:
         lines.append(f"- Wall-clock hours: {wall_clock:.3f}")
         lines.append(f"- GPU hours: {resource.get('gpu_hours', 0.0):.3f} (CPU-only pipeline)")
         lines.append(f"- Manual interventions: {intervention_count}")
-        lines.append(
+        # Cite the file only when it exists. `agent/supervisor.py` creates
+        # logs/restarts.jsonl on the first restart, so on a run with no crashes
+        # there is no file — and pointing a reviewer at a path that does not
+        # exist reads as a fabricated citation.
+        restart_note = (
             f"- Automatic process restarts after a crash: {restart_count} "
-            "(recorded in `logs/restarts.jsonl`). These are NOT manual interventions: "
-            "the organizer confirmed in the Track 2 workshop Q&A (2026-08-31) that only "
-            "changing the agent's behaviour counts, and `agent/supervisor.py` re-executes "
-            "an identical command while the orchestrator resumes from its own checkpoint."
+            + (f"(recorded in `logs/restarts.jsonl`). "
+               if restart_path.exists() else
+               "(no crashes occurred, so `agent/supervisor.py` never created "
+               "`logs/restarts.jsonl`; it is written on the first restart). ")
+            + "Restarts are NOT manual interventions: the organizer confirmed in the "
+              "Track 2 workshop Q&A (2026-08-31) that only changing the agent's "
+              "behaviour counts, and `agent/supervisor.py` re-executes an identical "
+              "command while the orchestrator resumes from its own checkpoint."
         )
+        lines.append(restart_note)
         lines.append("\n### Token usage by model\n")
+        used = list(resource.get("token_usage_by_model", {}).keys())
         for model, usage in resource.get("token_usage_by_model", {}).items():
             lines.append(f"- {model}: {usage['input_tokens']:,} in / {usage['output_tokens']:,} out")
+        # The configured primary can differ from what actually served the run:
+        # llm_client fails over on a daily-quota 429 and skips the exhausted model
+        # for the rest of the run. Reporting only the configured model would
+        # misstate which system produced these results.
+        provider = cfg["agent"]["llm"]["provider"]
+        configured = cfg["agent"]["llm"][provider].get("iteration_model")
+        if used and configured and configured not in used:
+            lines.append("")
+            lines.append(
+                f"Note: the configured primary model (`{configured}`) contributed "
+                "**zero** tokens. The run executed entirely on the fallback tier after "
+                "a daily-quota 429; `agent/llm_client.py` fails over and skips the "
+                "exhausted model for the remainder of the run. The models listed above "
+                "are what actually served this run."
+            )
     else:
         lines.append("Resource usage report not yet generated.")
 
@@ -213,9 +238,10 @@ def _final_submission_section() -> list[str]:
 
     out.append("### Provenance\n")
     out.append("The reported validation primary was produced twice, by independent paths:\n")
-    out.append("1. cached score matrix -> `pipeline/eval_protocol.py` decomposition -> 0.6053")
+    _p = vm.get("primary", 0.0)
+    out.append(f"1. cached score matrix -> `pipeline/eval_protocol.py` decomposition -> {_p:.4f}")
     out.append("2. `pipeline.make_submission` -> `aligned_rows`/`score_rows` -> CSV -> "
-               "`starter_kit/evaluate.py` via `submit.py --score` -> 0.6053\n")
+               f"`starter_kit/evaluate.py` via `submit.py --score` -> {_p:.4f}\n")
     out.append("Agreement to four decimals on all three metrics establishes that the number "
                "reported here is the number the submitted artifact actually scores.\n")
     for k, v in d.get("artifact_sha256", {}).items():

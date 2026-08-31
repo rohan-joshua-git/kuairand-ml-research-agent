@@ -26,8 +26,13 @@ logs/*
 !logs/resource_usage.json
 !logs/pitfalls.json
 
-# Final submission artifacts (regenerable via `python -m pipeline.make_submission`)
-submissions/*.csv
+# Final submission artifacts ARE COMMITTED. They are deliverable #6 — the
+# graded model output in the Starter Kit schema — so a reviewer must be able
+# to obtain them from the repository. Their SHA-256 hashes are recorded in
+# submissions/FROZEN_CONFIG.json and verified by a clean-checkout rebuild.
+# Only superseded/scratch copies under a subdirectory stay out.
+submissions/*/*.csv
+submissions/_prev_*.csv
 
 # Raw/processed data (downloadable via pipeline/data/download.py or starter_kit/README.md)
 data/raw/*.csv
@@ -43,10 +48,3 @@ Thumbs.db
 
 # Generated code-graph output (graphify) — regenerable via `graphify update .`
 graphify-out/
-
-# Superseded submission artifacts. `submissions/*.csv` above only matches direct
-# children, so archived copies under submissions/<subdir>/ slipped through. The
-# CSVs are regenerable (`python -m pipeline.make_submission --ensemble-seeds N`)
-# and their SHA-256 hashes are recorded in submissions/FROZEN_CONFIG.json, so
-# provenance is tracked without ~7MB of prediction rows.
-submissions/**/*.csv

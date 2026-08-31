@@ -138,8 +138,8 @@ reads back into its prompt each iteration so it does not repeat a failure.
 
 ## Results
 
-**Submitted: validation primary 0.6053 vs the official baseline 0.6016 —
-+0.0037, both metrics up** (GAUC 0.6674 -> 0.6724, nDCG@5 0.5357 -> 0.5382),
+**Submitted: validation primary 0.6049 vs the official baseline 0.6016 —
++0.0033, both metrics up** (GAUC 0.6674 -> 0.6720, nDCG@5 0.5357 -> 0.5378),
 scored by the organizer's own `submit.py --score`.
 
 We claim **no hidden-test score**. It is scored once by the organizer, and a
@@ -157,7 +157,7 @@ attempt crashed the smoke test and was rolled back automatically.
 | Our editable pipeline (torch FM, official 5 fields) | 0.6017 | human |
 | + session-position feature | 0.6024 | human |
 | **+ agent's DeepFM-lite MLP branch (accepted)** | **0.6045** | **agent** |
-| + 10-seed rank-average ensemble (submitted) | **0.6053** | human |
+| + 10-seed rank-average ensemble (submitted) | **0.6049** | human |
 
 Three honest notes.
 
@@ -336,7 +336,7 @@ metric decomposition    1.599e-14 vs starter_kit/evaluate.py
 submission_valid.csv    HASH MATCH
 submission_test.csv     HASH MATCH
 official checker        124,909 / 170,588 rows, both pass
-official score (valid)  GAUC 0.6724 | nDCG@5 0.5382 | primary 0.6053
+official score (valid)  GAUC 0.6720 | nDCG@5 0.5378 | primary 0.6049
 ```
 
 ## Team

@@ -20,19 +20,22 @@
     "batch_size": 8192
   },
   "artifact_sha256": {
-    "submissions/submission_valid.csv": "1fd3f7c0ef47d1dd9fa1792b610f8c512e70765db02cd89098db178c559a46e2",
-    "submissions/submission_test.csv": "7f460171bbe0710244e3486c79d9a2e4342333203ade2242be5887abb4c46f30"
+    "submissions/submission_valid.csv": "165604f293c31411f0350ef923966780b381c5498952c17b2b9dfa4a2cbd46cf",
+    "submissions/submission_test.csv": "4e0a5972e2d401fa8c75b5c3c69b2ff43e8d81f595d43b8e12deb7c81d065db1"
   },
   "superseded_artifact_sha256": {
-    "submissions/previous_5seed/submission_test.csv": "ebc9432a29ea67786aaddc72720345501fa60e0e8ea9c3b46e1dc92af45ffd40",
-    "submissions/previous_5seed/submission_valid.csv": "67902fdc7ffb0a40246c8e5a0afd2354bed079db59c4f0ecced5a958e1606429"
+    "full-validation early stopping (methodologically contaminated, replaced)": {
+      "submissions/submission_valid.csv": "1fd3f7c0ef47d1dd9fa1792b610f8c512e70765db02cd89098db178c559a46e2",
+      "submissions/submission_test.csv": "7f460171bbe0710244e3486c79d9a2e4342333203ade2242be5887abb4c46f30",
+      "note": "Scored validation primary 0.6053, higher than the shipped 0.6049, but its models early-stopped over ALL validation rows including the confirmation half. Replaced because the higher number was not a clean held-out estimate."
+    }
   },
-  "note": "Submission CSVs are gitignored and regenerable. Hashes recorded here so the exact artifact can be verified. Final config: DeepFM-lite, 10-seed rank-average, seeds 0-9, validation primary 0.6053 (GAUC 0.6724 / nDCG@5 0.5382), scored by starter_kit/evaluate.py via submit.py --score on the valid split only.",
+  "note": "Final config: DeepFM-lite, 10-seed rank-average, seeds 0-9, early stopping on the SELECTION half only. Validation primary 0.6049 (GAUC 0.6720 / nDCG@5 0.5378), scored by starter_kit/evaluate.py via submit.py --score on the valid split only. Submission CSVs are committed to the repository; these hashes verify them.",
   "validation_metrics": {
     "source": "starter_kit/submit.py --score on submissions/submission_valid.csv (split=valid)",
-    "GAUC": 0.6724,
-    "nDCG_at_5": 0.5382,
-    "primary": 0.6053
+    "GAUC": 0.672,
+    "nDCG_at_5": 0.5378,
+    "primary": 0.6049
   },
   "baseline_reproduction": {
     "source": "python -m pipeline.official_baseline (validation only; test never evaluated)",
@@ -52,11 +55,12 @@
   "protocol": {
     "selection_users": 11270,
     "confirmation_users": 11107,
-    "selection_primary": 0.6083,
-    "confirmation_primary": 0.6023,
-    "advantage_over_frozen_prior_selection": 0.025,
-    "advantage_over_frozen_prior_confirmation": 0.0242,
-    "confirmation_looks_spent": 1
+    "selection_primary": 0.6081,
+    "confirmation_primary": 0.6016,
+    "advantage_over_frozen_prior_selection": 0.0248,
+    "advantage_over_frozen_prior_confirmation": 0.0235,
+    "confirmation_looks_spent": 1,
+    "early_stopping": "SELECTION HALF ONLY \u2014 pipeline/make_submission.py builds the mask with eval_protocol.user_half and passes it to run_training, so no confirmation user influences epoch choice for the shipped models."
   },
   "hidden_test": "NOT CLAIMED. The hidden test is scored once by the organizer. No test score is asserted anywhere in this repository. The official baseline's published test primary is 0.5946, quoted only as the organizer's own reference figure and never compared against a validation number."
 }

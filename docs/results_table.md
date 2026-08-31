@@ -24,12 +24,14 @@ Comparisons are against the official FM baseline's **validation** figures: GAUC 
 - Wall-clock hours: 0.196
 - GPU hours: 0.000 (CPU-only pipeline)
 - Manual interventions: 2
-- Automatic process restarts after a crash: 0 (recorded in `logs/restarts.jsonl`). These are NOT manual interventions: the organizer confirmed in the Track 2 workshop Q&A (2026-08-31) that only changing the agent's behaviour counts, and `agent/supervisor.py` re-executes an identical command while the orchestrator resumes from its own checkpoint.
+- Automatic process restarts after a crash: 0 (no crashes occurred, so `agent/supervisor.py` never created `logs/restarts.jsonl`; it is written on the first restart). Restarts are NOT manual interventions: the organizer confirmed in the Track 2 workshop Q&A (2026-08-31) that only changing the agent's behaviour counts, and `agent/supervisor.py` re-executes an identical command while the orchestrator resumes from its own checkpoint.
 
 ### Token usage by model
 
 - gemini-3.5-flash: 23,354 in / 17,504 out
 - gemini-3.5-flash-lite: 35,285 in / 15,287 out
+
+Note: the configured primary model (`gemini-3.6-flash`) contributed **zero** tokens. The run executed entirely on the fallback tier after a daily-quota 429; `agent/llm_client.py` fails over and skips the exhausted model for the remainder of the run. The models listed above are what actually served this run.
 
 ## Convergence rule
 
@@ -44,9 +46,9 @@ Comparisons are against the official FM baseline's **validation** figures: GAUC 
 
 | Validation metric | Official baseline | This submission | Absolute delta |
 |---|---|---|---|
-| GAUC | 0.6674 | **0.6724** | **+0.0050** |
-| nDCG@5 | 0.5357 | **0.5382** | **+0.0025** |
-| primary | 0.6016 | **0.6053** | **+0.0037** |
+| GAUC | 0.6674 | **0.6720** | **+0.0046** |
+| nDCG@5 | 0.5357 | **0.5378** | **+0.0021** |
+| primary | 0.6016 | **0.6049** | **+0.0033** |
 
 The scoring formula is `score_dataset = mean over m of delta(m)`. Because primary is itself the mean of the two metrics, that equals the primary delta.
 
@@ -68,16 +70,16 @@ The ensemble's **mean** gain is NOT established: 5-seed vs 1-seed is +0.00027, w
 
 Validation was split by user hash into 11,270 selection and 11,107 confirmation users. All exploration and early stopping used selection only; the confirmation half was looked at 1 time, after the config was frozen.
 
-Raw confirmation (0.6023) sits below selection (0.6083), but a frozen model-free video prior drops nearly identically, so that gap is population difficulty rather than overfitting. The model's advantage over that reference is +0.0250 on selection and +0.0242 on confirmation - it transfers to users never used for any decision.
+Raw confirmation (0.6016) sits below selection (0.6081), but a frozen model-free video prior drops nearly identically, so that gap is population difficulty rather than overfitting. The model's advantage over that reference is +0.0248 on selection and +0.0235 on confirmation - it transfers to users never used for any decision.
 
 ### Provenance
 
 The reported validation primary was produced twice, by independent paths:
 
-1. cached score matrix -> `pipeline/eval_protocol.py` decomposition -> 0.6053
-2. `pipeline.make_submission` -> `aligned_rows`/`score_rows` -> CSV -> `starter_kit/evaluate.py` via `submit.py --score` -> 0.6053
+1. cached score matrix -> `pipeline/eval_protocol.py` decomposition -> 0.6049
+2. `pipeline.make_submission` -> `aligned_rows`/`score_rows` -> CSV -> `starter_kit/evaluate.py` via `submit.py --score` -> 0.6049
 
 Agreement to four decimals on all three metrics establishes that the number reported here is the number the submitted artifact actually scores.
 
-- `submissions/submission_valid.csv` sha256 `1fd3f7c0ef47d1dd9fa1792b610f8c512e70765db02cd89098db178c559a46e2`
-- `submissions/submission_test.csv` sha256 `7f460171bbe0710244e3486c79d9a2e4342333203ade2242be5887abb4c46f30`
+- `submissions/submission_valid.csv` sha256 `165604f293c31411f0350ef923966780b381c5498952c17b2b9dfa4a2cbd46cf`
+- `submissions/submission_test.csv` sha256 `4e0a5972e2d401fa8c75b5c3c69b2ff43e8d81f595d43b8e12deb7c81d065db1`

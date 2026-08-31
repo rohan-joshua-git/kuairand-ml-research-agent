@@ -4,13 +4,13 @@ An LLM agent that runs the ML engineering loop — read the problem, inspect dat
 
 ## Result
 
-**Validation primary 0.6053** against the official FM baseline's **0.6016**.
+**Validation primary 0.6049** against the official FM baseline's **0.6016**.
 
 | Validation metric | Official baseline | This submission | Absolute delta |
 |---|---|---|---|
-| GAUC | 0.6674 | **0.6724** | **+0.0050** |
-| nDCG@5 | 0.5357 | **0.5382** | **+0.0025** |
-| primary | 0.6016 | **0.6053** | **+0.0037** |
+| GAUC | 0.6674 | **0.6720** | **+0.0046** |
+| nDCG@5 | 0.5357 | **0.5378** | **+0.0021** |
+| primary | 0.6016 | **0.6049** | **+0.0033** |
 
 Scored by the organizer's own `starter_kit/evaluate.py` via `submit.py --score`, not by our code. Final model: DeepFM-lite, 10-seed rank-average, seeds 0–9.
 
@@ -25,6 +25,20 @@ Scored by the organizer's own `starter_kit/evaluate.py` via `submit.py --score`,
 | Manual interventions | 2, both logged with reasoning in `logs/interventions.jsonl` |
 
 Full provenance, including artifact SHA-256s, is in [`docs/results_table.md`](docs/results_table.md) and `submissions/FROZEN_CONFIG.json`.
+
+## Where to verify each claim
+
+| Claim | Evidence |
+|---|---|
+| Beats the baseline by the stated delta | [`docs/results_table.md`](docs/results_table.md), `submissions/submission_valid.csv` |
+| Submission is in the Starter Kit schema | `submissions/submission_valid.csv`, `submissions/submission_test.csv` (committed) |
+| Artifact reproduces byte-identically | `submissions/FROZEN_CONFIG.json` SHA-256s + the clean-checkout run below |
+| No hidden-test labels used | [`docs/COMPLIANCE_NOTE.md`](docs/COMPLIANCE_NOTE.md), `pipeline/official_baseline.py`, `pipeline/data/loader.py` |
+| 2 manual interventions, instrumented not asserted | `logs/interventions.jsonl`, `agent/logger.py` `persisted_intervention_count()` |
+| Tokens and wall-clock measured, not estimated | `logs/resource_usage.json`, `agent/llm_client.py` `TokenLedger` |
+| The agent drove its own loop | `logs/iterations.jsonl` + `logs/iterations_pre_*.jsonl`, `agent/orchestrator.py` |
+| Every research claim has a negative control | [`docs/research_process.md`](docs/research_process.md) §6.5-6.7 |
+| Metric matches the organizer's script | `pipeline/evaluate.py` delegates to `starter_kit/evaluate.py`; decomposition verified to 1.6e-14 |
 
 ## Strategy
 
@@ -49,7 +63,7 @@ logged impressions. That single fact drove every decision.
 
 ## What this project actually is
 
-The score moved +0.0037. The interesting part is not that number — it is that **every alternative explanation for it was tested and eliminated**, and that several apparently promising signals were killed by controls rather than accepted.
+The score moved +0.0033. The interesting part is not that number — it is that **every alternative explanation for it was tested and eliminated**, and that several apparently promising signals were killed by controls rather than accepted.
 
 The methodology is the contribution:
 
@@ -109,13 +123,58 @@ Kept separate deliberately.
 
 **Interpretation, not established:** harm scales with how much the model trusts the band — the user embedding already learns this modulation from the same data, and an explicit precomputed summary adds a redundant, coarser pathway that generalises worse.
 
+### What the agent proposed across all runs
+
+The graded run's seven hypotheses are dominated by regularization scalars, and on
+their own they understate the search. Six earlier runs are preserved in
+`logs/iterations_pre_*.jsonl`, and across them the agent targeted the **loss
+function, the architecture, and the feature surface** — not just hyperparameters:
+
+| Run log | Hypothesis | Validation primary |
+|---|---|---|
+| `_082207` it1 | per-user pairwise BPR loss | 0.5056 |
+| `_085518` it1 | per-user pairwise BPR loss (second implementation) | 0.5994 |
+| `_085518` it3 | listwise ListNet objective | 0.6004 |
+| `_082207` it2 | auxiliary BCE heads on secondary feedback signals | 0.5610 |
+| `_085518` it2 | multi-task architecture over auxiliary labels | 0.6013 |
+| `_235428` it1 | replace pointwise BCE with a ranking loss | 0.5921 |
+| `_090423` it1-3 | global item-quality prior as a feature | 0.6024-0.6026 |
+| graded it2 | DeepFM `[64,32]` (crashed the smoke test, rolled back) | - |
+| **graded it4** | **DeepFM-lite `[32,16]` MLP branch (accepted)** | **0.6045** |
+
+Every one below the champion was rolled back automatically. The organizer's own
+#1-ranked lead — switch to a pairwise or listwise ranking objective — was
+proposed by the agent unprompted on the first iteration of three separate runs,
+and refuted three times by independent implementations.
+
+**Attribution, stated plainly.** The dataset findings in `agent/skill_store/`
+are *human* research, written before any run and injected into the agent's
+reflect prompt by design. The hypotheses above are the agent's. The results
+table separates human-authored from agent-authored steps for the same reason.
+
+### A rule deviation we are disclosing
+
+Our acceptance policy used epsilon for two jobs, and it cost us. Iteration 6
+scored **0.60496** against the accepted best **0.60449** — genuinely better —
+but the gain (+0.00046) did not clear epsilon = 0.002, so it was rolled back.
+The run therefore stopped holding the **second-best** checkpoint, and the shipped
+model is about **+0.0005** below the validation-best.
+
+FAQ 2.9.1(c) asks for the validation-best checkpoint at the point the run stops.
+`agent/orchestrator.py` now separates the two rules — any improvement is accepted
+as the new best, while epsilon governs only the plateau window — but that change
+postdates the graded run and we have not re-run to exploit it. The affected row
+is flagged in [`docs/results_table.md`](docs/results_table.md).
+
 ## How results are protected from ourselves
 
 **Selection/confirmation split.** ~30 configurations had been compared against the whole validation split, so the winner's curse was unbounded. [`pipeline/eval_protocol.py`](pipeline/eval_protocol.py) partitions validation by user hash into 11,270 selection and 11,107 confirmation users. All exploration and early stopping use selection only. The confirmation half was looked at **once**, after the config was frozen.
 
 Its per-user decomposition of GAUC/nDCG@5 is verified against `starter_kit/evaluate.py` to **1.6e-14**, including a tie-heavy case, which is what makes the user-level bootstrap exact rather than approximate.
 
-**Confirmation result.** Raw confirmation (0.6023) sits below selection (0.6083) — but a frozen model-free video prior drops by nearly the same amount (+0.0053 against the model's +0.0059), so that gap is population difficulty, not overfitting. The model's advantage over that reference is **+0.0250 on selection and +0.0242 on confirmation**: the learned advantage transfers to users never used for any decision.
+**Early stopping uses the selection half only.** `pipeline/make_submission.py` builds the mask with `eval_protocol.user_half` and passes it to every shipped model, so no confirmation user influences epoch choice. An earlier artifact scored **0.6053** but early-stopped over *all* validation rows; it was replaced because the higher number was not a clean held-out estimate. Its hashes are retained in `FROZEN_CONFIG.json` under `superseded_artifact_sha256`.
+
+**Confirmation result.** Raw confirmation (0.6016) sits below selection (0.6081), but a frozen model-free video prior drops similarly on the same users, so that gap is population difficulty rather than overfitting. The model's advantage over that reference is **+0.0248 on selection and +0.0235 on confirmation** — a difference of 0.0013, at the edge of the ~0.0011 user-sampling band rather than comfortably inside it. The learned advantage substantially transfers to users never used for any decision; we do not claim it transfers exactly.
 
 **Why the submission is an ensemble.** The mean gain is **not** established — 5-seed vs 1-seed is +0.00027, while same-model negative controls reach 0.00077. It ships for **variance**, which is established: single-seed std 0.00049 over 20 seeds against 5-seed std 0.00020, matching √n. On a one-shot submission the floor is what matters — worst single seed 0.6036, worst 5-seed ensemble 0.6046.
 
@@ -128,10 +187,43 @@ metric decomposition        1.599e-14 vs starter_kit/evaluate.py
 submission_valid.csv        1fd3f7c0...46e2   HASH MATCH
 submission_test.csv         7f460171...4f30   HASH MATCH
 official checker            124,909 / 170,588 rows, both pass
-official score (valid)      GAUC 0.6724 | nDCG@5 0.5382 | primary 0.6053
+official score (valid)      GAUC 0.6720 | nDCG@5 0.5378 | primary 0.6049
 ```
 
-**Reproducibility.** The reported 0.6053 was produced twice by independent paths — cached score matrix → `eval_protocol` decomposition, and `make_submission` → `aligned_rows`/`score_rows` → CSV → `starter_kit/evaluate.py`. They agree to four decimals on all three metrics, which establishes the reported number is the number the submitted artifact actually scores.
+**Reproducibility.** The reported 0.6049 was produced twice by independent paths — cached score matrix → `eval_protocol` decomposition, and `make_submission` → `aligned_rows`/`score_rows` → CSV → `starter_kit/evaluate.py`. They agree to four decimals on all three metrics, which establishes the reported number is the number the submitted artifact actually scores.
+
+## Data integrity and compliance
+
+Every rule, how it is enforced, and where to check. Full disclosure of one
+closed exposure is in [`docs/COMPLIANCE_NOTE.md`](docs/COMPLIANCE_NOTE.md),
+including a correction to one of our own commit messages.
+
+| Rule | Enforcement | Where to verify |
+|---|---|---|
+| Hidden-test labels never used for training, selection, early stopping or feature stats | `allow_test=False` default; the only `allow_test=True` is the submission writer; `official_baseline.py` starves the vendored baseline of test rows | `pipeline/data/loader.py`, `pipeline/make_submission.py`, `pipeline/official_baseline.py` |
+| Test split never locally scored | The test submission is written and alignment-checked, never passed to `--score` | `pipeline/make_submission.py` |
+| Feature statistics fit on train only | Vocabularies, `dur_bucket` quantiles and cross target-encodings all built from `split.train`; target encoding is 5-fold out-of-fold | `pipeline/train.py` `_build_id_maps`, `_fit_cross_te` |
+| Random-exposure log never used for training | Loader defaults to `window="val"` and **fails closed** if it cannot prove the test window is excluded; the live probe filters dates again | `pipeline/data/loader.py`, `pipeline/train_runner.py` |
+| KuaiRand-1k / 27k not used | No loader, no reference anywhere | `grep -rn "kuairand-1k\|kuairand-27k"` returns nothing |
+| No external training data | Zenodo supplements declared out of scope, never loaded | `config/agent_config.yaml` `supplements:` |
+| Same-row outcome signals never used as inputs | Encoder iterates an explicit allowlist; `play_time_ms`, `*_stay_time`, `is_profile_enter` are excluded by name | `pipeline/train.py` `resolve_fields`, `pipeline/data/features.py` |
+| Statistic-file leakage | Dropped by exact column name, not a naming convention | `pipeline/data/leakage_guard.py` |
+| No time-travel features | `pos_bucket` is a `cumcount` over time-sorted rows, counting only preceding same-day impressions | `pipeline/data/features.py` |
+| Row alignment preserved | `_orig_row_pos` tagged before the feature build and scattered back; `aligned_rows` proves the id sequence matches the starter kit element-for-element | `pipeline/submit.py` |
+| No NaN/Inf in scores | Explicit `np.isfinite` guard that raises | `pipeline/submit.py` |
+
+Official checker output on the submitted files:
+
+```
+$ PYTHONIOENCODING=utf-8 python submit.py --check ../submissions/submission_valid.csv --split valid
+格式与对齐校验通过：124,909 行，split=valid
+$ PYTHONIOENCODING=utf-8 python submit.py --check ../submissions/submission_test.csv --split test
+格式与对齐校验通过：170,588 行，split=test
+```
+
+(On Windows the checker raises `UnicodeEncodeError` *after* every check passes,
+because its success line prints U+2713. Set `PYTHONIOENCODING=utf-8` and confirm
+exit 0.)
 
 ## Agent design
 
@@ -189,6 +281,8 @@ pipeline/
   make_submission.py     the ONLY place allow_test=True is set
 scripts/                 the experiments behind the research table
 docs/
+  COMPLIANCE_NOTE.md     disclosed hidden-test exposure, closed, with a correction
+                         to one of our own commit messages
   research_process.md    full account: every hypothesis, control and disposition
   backlog_triage.md      ~95-item method backlog mapped to evidence
   results_table.md       generated by agent/report.py — never hand-edited

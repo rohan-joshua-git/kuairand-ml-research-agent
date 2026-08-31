@@ -41,6 +41,9 @@ def main() -> None:
     args = parser.parse_args()
 
     import numpy as np
+    from pipeline.data.features import build_features
+    from pipeline.data.loader import load_split
+    from pipeline.eval_protocol import user_half
     from pipeline.submit import (aligned_rows, score_rows, validate_submission,
                                  write_submission_from_scores)
     from pipeline.train import run_training
@@ -48,7 +51,24 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    overrides = {"seed": args.seed}
+    # EARLY STOPPING USES THE SELECTION HALF ONLY.
+    #
+    # Without this, every shipped model picks its best epoch by scoring ALL
+    # validation rows — including the confirmation users that the protocol in
+    # pipeline/eval_protocol.py exists to hold out. That would make the
+    # confirmation figure a contaminated estimate for the very artifact being
+    # submitted, and would falsify the claim in docs/results_table.md that
+    # "all exploration and early stopping used selection only".
+    #
+    # The mask must be built from build_features(split.val), not split.val:
+    # build_features sorts by user_id, and run_training evaluates the sorted
+    # frame, so a mask built on the raw loader order would silently misalign.
+    _split = load_split()
+    _es_mask = user_half(build_features(_split.val)["user_id"].to_numpy())
+    print(f"[make_submission] Early stopping on the SELECTION half only: "
+          f"{_es_mask.sum():,} of {len(_es_mask):,} validation rows.")
+
+    overrides = {"seed": args.seed, "early_stop_mask": _es_mask}
     if args.epochs is not None:
         overrides["epochs"] = args.epochs
 

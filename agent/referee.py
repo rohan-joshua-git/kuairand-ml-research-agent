@@ -1,6 +1,28 @@
 """
 Play 1: Unbiased Referee.
 
+    STATUS: THIS MODULE IS NOT ON THE LIVE PATH. Verified by grepping
+    build_referee_report, score_against_unbiased_probe and load_probe_log over
+    agent/ and pipeline/ — zero call sites outside this file.
+
+    The probe that ACTUALLY runs each scored iteration is 19 lines inline in
+    `pipeline/train_runner.py:84-102`. It loads the random-exposure log,
+    restricts it to the validation window, scores the trained model against it,
+    and writes `unbiased_gauc` / `unbiased_ndcg_at_5` / `unbiased_primary` into
+    the iteration payload. Those are the numbers in the "Unbiased probe" column
+    of docs/results_table.md.
+
+    This module is the fuller design — propensity estimation and a structured
+    divergence report — that the inline path was reduced from. It is kept
+    because the propensity helper documents the Tier-A/Tier-B distinction the
+    config depends on, and removing it would strand that reasoning. It is not
+    scaffolding that silently pretends to run: read the inline path if you want
+    to know what executed.
+
+    (Its loader is safe regardless: `load_probe_log` calls
+    `load_random_exposure_log`, which defaults to `window="val"` and fails
+    closed if it cannot prove the test window is excluded.)
+
 KuaiRand-Pure's standard validation split is itself biased — every row in
 it was already selected for exposure by the prior recommendation policy.
 An agent that only ever checks its score against that split can, given

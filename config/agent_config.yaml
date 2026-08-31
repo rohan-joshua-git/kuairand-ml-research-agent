@@ -40,8 +40,17 @@ starter_kit:
   token_budget: null               # not capped — tokens reported for Feasibility scoring only
   submission_schema_path: "./starter_kit/submit.py"  # row_id,user_id,video_id,score — see that module
   official_baseline:
-    # starter_kit/baseline_scores.json "fm_official" — reproduced locally, test primary landed at
-    # 0.5953 vs published 0.5946 (within the 0.0008 seed std). This is the score the agent must beat.
+    # The organizer's PUBLISHED figures, copied from starter_kit/baseline_scores.json
+    # "fm_official". Neither block is computed by us.
+    #
+    # `valid` is the reference the agent is scored against: every delta in the run
+    # log and in docs/results_table.md is measured against valid.primary 0.6016.
+    #
+    # `test` is the organizer's own published hidden-test figure. It is quoted in
+    # exactly one place — the reference line in docs/results_table.md — and is never
+    # differenced against a validation number. We do NOT compute a hidden-test score;
+    # pipeline/official_baseline.py contains a guard that starves the vendored
+    # baseline of test rows. See docs/COMPLIANCE_NOTE.md.
     valid: {GAUC: 0.6674, nDCG_at_5: 0.5357, primary: 0.6016}
     test:  {GAUC: 0.6610, nDCG_at_5: 0.5282, primary: 0.5946}
   oracle_ceiling:
