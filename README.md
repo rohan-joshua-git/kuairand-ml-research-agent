@@ -22,9 +22,86 @@ The organizer's KuaiRand-Pure Starter Kit (vendored verbatim in [`starter_kit/`]
 |---|---|---|
 | Official baseline reproduction | Implemented | `pipeline/official_baseline.py` runs the vendored FM baseline directly; verified locally to reproduce the published test primary (0.5946) within the 0.0008 seed std — see [Task Requirement #1](#reproducing-the-official-baseline). |
 | End-to-end loop | Implemented | Scores through the vendored `starter_kit/evaluate.py` (GAUC/nDCG@5), not a reimplementation — see [Architecture](#architecture). Run live against the Gemini backend; every scored run happens in a fresh subprocess (`pipeline/train_runner.py`) so the code being measured is exactly what the last patch wrote. |
-| Self-editing code | Implemented | Real API calls, scoped to `features.py`, `label.py`, `train.py`, `model/baseline.py` and `ablation.py`, with automatic rollback on a failed smoke test — proven for both a syntactically broken patch and one that imports cleanly then crashes at run time (`scripts/test_code_editor.py`). |
+| Self-editing code | Implemented | Real API calls with automatic rollback on a failed smoke test — proven both for a syntactically broken patch and for one that imports cleanly then crashes at run time (`scripts/test_code_editor.py`). `EDITABLE_FILES` allows `features.py`, `label.py`, `train.py`, `model/baseline.py` and `ablation.py`; note the hypothesis router (`route_target_file`) currently only ever selects the first three, so the last two are reachable config rather than surface the agent actually edits today. |
 | Unbiased referee | Implemented | Wired into every scored iteration: the trained model scores a validation-window slice of the random-exposure log, and the biased-vs-unbiased divergence is logged per iteration with an alert threshold. |
+| Final submission | Implemented | `pipeline/make_submission.py` is the only place `allow_test=True` is set. Supports `--ensemble-seeds N`, which rank-averages N seeds (rank, not score — only within-user order is scored). Measured: 1 seed 0.6017, 5 seeds 0.6028. |
 | Submission writer | Implemented | `pipeline/submit.py` writes the confirmed `row_id,user_id,video_id,score` schema via the vendored `starter_kit/submit.py`, with row-order alignment cross-checked against `pipeline/data/loader.py`. Verified end-to-end (write + official `--check`/`--score` validation) against real data. |
+
+## Results (measured, not projected)
+
+**The agent did not beat the official baseline. It converged at parity.** That
+is the honest headline; the delta is scored continuously, so an accurate
+negative is worth more than an inflated claim.
+
+Run of 2026-08-31, Gemini backend, scored by the vendored
+`starter_kit/evaluate.py` on the validation split:
+
+| Iteration | Change | GAUC | nDCG@5 | Primary | vs prev best |
+|---|---|---|---|---|---|
+| 0 | Official FM baseline, reproduced via `starter_kit/baseline.py` | 0.6671 | 0.5358 | 0.6015 | — |
+| 0 | **Our starting pipeline (torch FM, human-authored)** | **0.6676** | **0.5358** | **0.6017** | — |
+| 1 | Agent: per-user pairwise BPR loss | 0.6646 | 0.5341 | 0.5994 | −0.0024 |
+| 2 | Agent: multi-task auxiliary `is_click` head (weight 0.2) | 0.6670 | 0.5356 | 0.6013 | −0.0004 |
+| 3 | Agent: listwise ListNet cross-entropy loss | 0.6655 | 0.5353 | 0.6004 | −0.0013 |
+
+Converged under the official rule (ε=0.002, N=3). Final submitted checkpoint
+is the iteration-0 pipeline at **primary 0.6017 vs the published baseline
+0.6016 — a delta of +0.0001**, which is inside seed noise (published 5-seed
+std 0.0008). Every non-improving patch was rolled back automatically, so the
+working tree holds the submitted state.
+
+Cost: 38,361 tokens, 0.118 wall-clock hours, 0 GPU-hours (CPU-only).
+**Manual interventions: 1** — see [Autonomy accounting](#autonomy-accounting).
+
+### What the agent got right, and what it cost us
+
+The agent independently proposed **switching the loss to a ranking objective
+on its first iteration, in three separate runs** — which is the organizer's
+own #1-ranked lead in `starter_kit/README.md`. It then progressed pointwise ->
+pairwise -> listwise across iterations, reading its own failure history rather
+than repeating itself. The search behaviour is sound.
+
+The finding is that the lead did not pay off here. Pairwise BPR, a listwise
+ListNet objective, and a multi-task auxiliary head all landed 0.0004–0.0024
+*below* pointwise logloss on this data. Three independent implementations
+moving the same direction is weak evidence that the ceiling on this dataset is
+not objective misalignment.
+
+Two things we checked so we would not misattribute the plateau:
+- **Not undertraining.** Raising the epoch cap from 12 to 40 with patience 4
+  early-stops at 13 epochs and returns the identical 0.6017.
+- **Not the known dead ends.** Adding features and growing embedding capacity
+  were already measured flat by the organizer
+  (`starter_kit/ablation_features.py`), which is why they are Tier-1 knowledge
+  the agent is told not to re-test.
+
+### Autonomy accounting
+
+- **Manual interventions: 1.** Mid-run we changed `agent/llm_client.py`'s
+  failover policy (a daily-quota 429 now fails over immediately instead of
+  walking a 15/30/60/120s backoff ladder) and relaunched. That is a change to
+  the agent's *behaviour*, so it counts. Recorded with its reasoning in
+  `logs/interventions.jsonl`.
+- **Process restarts after a crash: not counted, and here is why.** In the
+  Track 2 workshop Q&A (2026-08-31) the organizer was asked directly and
+  answered that restarting a crashed process is not a manual intervention —
+  "we only consider the manual intervention if you change the agent's
+  behaviour" — and suggested a second session do the restarting.
+  `agent/supervisor.py` is that, automated: it re-executes an identical
+  command and touches no code, config, or checkpoint selection, while the
+  orchestrator resumes from `agent/checkpoint.py` with its wall-clock budget
+  already charged. Restarts are logged separately in `logs/restarts.jsonl`.
+
+### Known weakness in our own instrumentation
+
+The unbiased-referee divergence alert fired on **every** iteration (+0.19 to
++0.24 against a 0.05 threshold) and therefore carried no information. The
+random-exposure probe has a structurally different label distribution than the
+biased split (probe primary ~0.36 vs biased ~0.60), so the absolute gap is
+large by construction. The informative signal is the *change* in divergence
+across iterations, not its level; the threshold should be set on that instead.
+We are reporting this rather than presenting the referee as having caught
+something.
 
 ## Architecture
 

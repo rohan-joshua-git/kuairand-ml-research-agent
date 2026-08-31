@@ -38,26 +38,15 @@ class SubmissionAlignmentError(RuntimeError):
     pass
 
 
-def write_submission(
-    model: nn.Module,
-    id_maps: dict,
-    out_path: str | Path,
-    split: str = "valid",
-    allow_test: bool = False,
-    cfg: dict | None = None,
-) -> None:
-    """Writes a submission CSV for `split` ('valid' or 'test'). Generating a
-    'test' submission requires `allow_test=True` explicitly — same guard
-    philosophy as `pipeline.data.loader.load_split`, since test is hidden
-    during development and only the final scoring run should touch it.
-    """
+def aligned_rows(split: str = "valid", allow_test: bool = False, cfg: dict | None = None):
+    """Returns (kit_rows, our_df) after proving the two row orders agree. Split
+    out of write_submission so the ensemble path reuses the identical checked
+    lookup rather than a parallel copy of it."""
     if split == "test" and not allow_test:
         raise ValueError(
-            "Generating a 'test' split submission requires allow_test=True. "
-            "Test is hidden during development — only the final, designated "
-            "submission run should set this."
+            "Reading the 'test' split requires allow_test=True. Test is hidden "
+            "during development — only the final, designated submission run should set this."
         )
-
     cfg = cfg or load_config()
     kit_splits = _sk_data.load(cfg["dataset"]["raw_dir"])
     kit_rows = kit_splits[split]
@@ -80,14 +69,18 @@ def write_submission(
             f"{our_uv[first_bad]}, starter_kit.data.load gave {kit_uv[first_bad]}. "
             "Do not submit — row_id alignment is not guaranteed."
         )
+    return kit_rows, our_df
 
-    # build_features is agent-editable and MAY permute rows (it currently
-    # sorts by user_id for pairwise-loss grouping; the raw logs are NOT
-    # user-sorted — verified on real data). Scores must be written in
-    # kit_rows' original file order, so carry each row's original position
-    # through the feature build and un-permute the scores afterwards. This
-    # is the difference between a valid submission and one that silently
-    # passes --check with every score attached to the wrong row.
+
+def score_rows(model: nn.Module, id_maps: dict, our_df) -> np.ndarray:
+    """Scores `our_df` and returns scores in ITS original row order.
+
+    build_features is agent-editable and MAY permute rows (it sorts by user_id
+    for pairwise-loss grouping; the raw logs are NOT user-sorted — verified on
+    real data). Carrying each row's original position through the feature build
+    and un-permuting afterwards is the difference between a valid submission
+    and one that silently passes --check with every score on the wrong row.
+    """
     from pipeline.train import score_dataframe  # late import: use on-disk code
 
     tagged = our_df.copy()
@@ -98,10 +91,51 @@ def write_submission(
             "build_features added or dropped rows — cannot align scores to the "
             "submission row order. Fix build_features to be row-preserving."
         )
-    permuted_scores = score_dataframe(model, id_maps, feat_df)
+    permuted = score_dataframe(model, id_maps, feat_df)
     scores = np.empty(len(tagged), dtype=np.float64)
-    scores[feat_df["_orig_row_pos"].to_numpy()] = permuted_scores
+    scores[feat_df["_orig_row_pos"].to_numpy()] = permuted
+    return scores
 
+
+def write_submission_from_scores(
+    scores: np.ndarray,
+    out_path: str | Path,
+    split: str = "valid",
+    allow_test: bool = False,
+    cfg: dict | None = None,
+) -> None:
+    """Writes an already-computed score vector (e.g. an ensemble average) that
+    must be in the eval split's own row order."""
+    kit_rows, our_df = aligned_rows(split=split, allow_test=allow_test, cfg=cfg)
+    scores = np.asarray(scores, dtype=np.float64)
+    if len(scores) != len(kit_rows):
+        raise SubmissionAlignmentError(f"got {len(scores)} scores for {len(kit_rows)} rows")
+    if not np.isfinite(scores).all():
+        raise SubmissionAlignmentError("scores contain NaN/Inf — the organizer's checker rejects these")
+    _sk_submit.write_submission(str(out_path), kit_rows, scores)
+
+
+def write_submission(
+    model: nn.Module,
+    id_maps: dict,
+    out_path: str | Path,
+    split: str = "valid",
+    allow_test: bool = False,
+    cfg: dict | None = None,
+) -> None:
+    """Writes a submission CSV for `split` ('valid' or 'test'). Generating a
+    'test' submission requires `allow_test=True` explicitly — same guard
+    philosophy as `pipeline.data.loader.load_split`, since test is hidden
+    during development and only the final scoring run should touch it.
+    """
+    if split == "test" and not allow_test:
+        raise ValueError(
+            "Generating a 'test' split submission requires allow_test=True. "
+            "Test is hidden during development — only the final, designated "
+            "submission run should set this."
+        )
+    kit_rows, our_df = aligned_rows(split=split, allow_test=allow_test, cfg=cfg)
+    scores = score_rows(model, id_maps, our_df)
     _sk_submit.write_submission(str(out_path), kit_rows, scores)
 
 

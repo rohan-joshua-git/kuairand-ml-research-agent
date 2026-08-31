@@ -138,15 +138,80 @@ reads back into its prompt each iteration so it does not repeat a failure.
 
 ## Results
 
-See `docs/results_table.md` for the generated per-iteration table and
-resource usage report.
+**The agent converged at parity with the official baseline; it did not beat
+it.** Final validation primary **0.6017** vs the published **0.6016**. The
+submitted artifact is a 5-seed rank-averaged ensemble of that converged
+pipeline, which measures **0.6028** on validation (+0.0012 over baseline).
+Per-iteration trajectory, resource usage and the intervention count are in
+`docs/results_table.md`, generated from `logs/iterations.jsonl`.
+
+What the agent proposed, in order: pairwise BPR (0.5994), a multi-task
+auxiliary `is_click` head (0.6013), listwise ListNet (0.6004). Each was
+rolled back automatically for failing to clear ε=0.002, and the run converged
+under the official N=3 rule.
+
+### The negative results are the finding
+
+We went looking for why the organizer's own priority list did not pay off, and
+the answer is a property of the dataset rather than of the agent. Measuring
+within-user GAUC of individual signals on a 4,000-user validation sample
+(0.5 = no signal at all):
+
+| Signal | within-user GAUC |
+|---|---|
+| Train-derived smoothed video quality prior | **0.6453** |
+| `tab` | 0.5387 |
+| Session position (impression order within a user-day) | 0.5148 |
+| `duration_ms` / `hourmin` | ~0.486 |
+| **user x author affinity** | **0.4981 — none** |
+| **user x video affinity** | **0.4970 — none** |
+
+The entire official FM reaches 0.6674. A single scalar item-quality prior gets
+to 0.6453 of that alone. **This task is item-quality estimation with almost no
+personalisation signal**, which explains three things at once: why adding
+user-side features was already flat in the organizer's own ablation, why our
+loss-alignment changes could not help (the objective was not the bottleneck),
+and why behavioural-sequence modelling — the organizer's #2 unexplored lead —
+is unlikely to pay off here. Repeat exposure is only 1.62% of validation rows,
+and long_view rates on repeat pairs (0.3072) and new pairs (0.3134) are
+effectively identical, so there is little history to model.
+
+We also checked, so as not to misattribute the plateau: the model is not
+undertrained (raising the epoch cap 12 -> 40 early-stops at 13 with an
+identical score), and a LambdaMART ranker optimising nDCG directly scored
+0.5901 — it spends its strongest splits on features that are constant within a
+user and therefore cannot change that user's ordering.
+
+### On the random-exposure log
+
+KuaiRand-Pure ships a 1,186,059-row uniform-random-exposure log, and it is
+tempting as extra training data. It is not usable: **897,721 of those rows
+(75.7%) fall inside the hidden-test date window**, and its long_view rate is
+0.0850 against 0.3133 in the standard log, because uniform exposure mostly
+shows people videos they do not want. Training on it means test-period
+contamination plus a train/serve distribution mismatch. We use it only as the
+unbiased probe, which is its sanctioned use — and that distribution gap is
+also why our referee's absolute divergence is always large, so only the change
+in divergence across iterations is meaningful. We report that as an
+instrumentation weakness rather than claiming the referee caught something.
 
 ## What's next
 
-- Wire the organizer's real Starter Kit baseline in place of
-  `pipeline/model/baseline.py` (see README "Open Questions").
-- Extend the compression gate's reproducer to actually re-train (not just
-  reason about) the compressed summary, for a stronger empirical check.
-- Extend `agent/code_editor.py`'s editable-file allowlist to cover model
-  architecture files directly, once the smoke-test harness has proven
-  reliable on the current (narrower) surface.
+- **Give the agent a signal it can actually exploit.** Our measurements say
+  the ceiling here is item-quality estimation, which the FM already does well.
+  The directions with any remaining room are content-side (video captions and
+  category taxonomy exist as Zenodo supplements) rather than
+  behavioural — but those are not referenced by the official problem statement,
+  so we treated them as out of scope rather than quietly using them.
+- **Make the compression gate re-train, not just reason.** As built, a fresh
+  context judges a terse summary with no validation access. The stronger
+  version re-runs training from that summary and compares scores.
+- **Set the referee's alert on the change in divergence, not its level.** The
+  two splits have structurally different label distributions, so the absolute
+  gap is uninformative — see Results.
+- **Persist "this hypothesis scored worse" across runs.** Pitfalls currently
+  record crashes and gate rejections, so a fresh run would happily re-propose
+  BPR. Carrying scored-worse outcomes into the pitfall store would stop that.
+- **New-file creation in the editor**, so the agent can add an architecture
+  variant under `pipeline/model/architectures/` rather than only rewriting
+  files at fixed paths.

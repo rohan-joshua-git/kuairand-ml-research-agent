@@ -134,6 +134,63 @@ size" as a first move — it's a measured dead end, not a guess.**
    organizer-flagged unexplored lead, not the same thing as "use the
    27K/1K sequential variant."
 
+
+## Measured on this repo, 2026-08-31 (our own experiments — treat as settled)
+
+These were run against real KuaiRand-Pure and are reproducible. They close off
+several directions the organizer listed as "unexplored", so do NOT re-spend
+iterations on them without new evidence.
+
+**The task is item-quality estimation, not personalisation.** Within-user GAUC
+of single signals, on a 4,000-user validation sample (0.5 = no signal):
+
+| Signal | within-user GAUC |
+|---|---|
+| Train-derived smoothed video long_view prior | **0.6453** |
+| `tab` | 0.5387 |
+| Session position (impression order within user-day) | 0.5148 |
+| `duration_ms` | 0.4865 |
+| `hourmin` | 0.4867 |
+| **user x author affinity** (train-derived) | **0.4981 — none** |
+| **user x video affinity** (train-derived) | **0.4970 — none** |
+
+For scale, the whole official FM reaches valid GAUC 0.6674. A single scalar
+item-quality prior gets to 0.6453 of that on its own.
+
+**Consequences:**
+1. **Behavioural-history / sequence modelling (organizer priority 2) is very
+   likely a dead end here.** User-side history has no measurable within-user
+   ranking signal, and repeat exposure is only 1.62% of validation rows with
+   an identical long_view rate on repeats (0.3072) vs new pairs (0.3134).
+   DIN/SIM-style interest modelling needs a personalisation signal that this
+   split does not appear to contain.
+2. **Loss-function changes did not pay off** (three independent agent
+   implementations): pairwise BPR 0.5994, listwise ListNet 0.6004, multi-task
+   auxiliary head 0.6013 — all below pointwise logloss at 0.6017.
+3. **Not undertrained.** Raising the FM epoch cap 12 -> 40 with patience 4
+   early-stops at 13 epochs and returns an identical 0.6017.
+4. **LambdaMART (LightGBM `lambdarank`, groups = users) scored 0.5901** on
+   engineered prior/context features. It spends its top splits on
+   within-user-CONSTANT features (`user_rate`, `user_n`) which cannot affect
+   within-user order. If retried, drop every user-constant feature first.
+5. **Seed ensembling is the one measured win: 5-seed rank-average = 0.6028 vs
+   0.6017 single** (+0.0011). Rank-average, not score-average — only order is
+   scored. Applied at submission time only, so it does not slow the loop.
+
+**Per-user candidate lists are tiny**: median 4 impressions, 63.7% of users
+have <= 5. So nDCG@5 is effectively full-list nDCG for most users, and there
+is little room for clever re-ordering.
+
+**The random-exposure log cannot be used for training.** 1,186,059 rows, dates
+2022-04-22..05-08 — **897,721 of them (75.7%) fall inside the hidden-test
+window**, and its long_view rate is 0.0850 versus 0.3133 in the standard log
+(uniform exposure shows users mostly irrelevant videos). Training on it means
+both test-period contamination and a train/serve distribution mismatch. Its
+sanctioned use is the unbiased probe, which is how `agent/referee.py` uses it.
+This also explains why the referee's absolute divergence is always large
+(~0.19-0.24): the two splits have structurally different label distributions,
+so only the CHANGE in divergence across iterations is informative.
+
 ## Where to look next
 
 - Need RecSys architecture/method background? -> Tier 2 (`tier2_domain.md`)
