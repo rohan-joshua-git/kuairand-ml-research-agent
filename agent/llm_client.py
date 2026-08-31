@@ -28,17 +28,29 @@ from typing import Callable, Protocol
 # the robustness criterion it's graded on, so every call gets bounded
 # exponential backoff before the error is allowed to propagate.
 _RETRYABLE_MARKERS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500", "INTERNAL", "overloaded", "timeout", "timed out")
+# A quota-exhaustion 429 is NOT transient the way a 503 is: the quota resets on
+# the provider's schedule, not in the next few minutes. Backing off through the
+# full ladder before failing over burned ~225s per call for no chance of
+# success, so these are detected and the model is skipped for the rest of the
+# run instead (see GeminiLLMClient._call).
+_QUOTA_MARKERS = ("429", "RESOURCE_EXHAUSTED", "exceeded your current quota")
 _MAX_ATTEMPTS = 6
 _BACKOFF_BASE_S = 15.0
 
 
-def _call_with_retry(fn: Callable[[], "LLMResponse"], description: str, max_attempts: int = _MAX_ATTEMPTS) -> "LLMResponse":
+def _call_with_retry(fn: Callable[[], "LLMResponse"], description: str, max_attempts: int = _MAX_ATTEMPTS,
+                     give_up_markers: tuple[str, ...] = ()) -> "LLMResponse":
+    """`give_up_markers` are substrings that mean "do not bother retrying this
+    model" (a daily-quota 429 when a fallback model is available) — the caller
+    handles failover immediately instead of walking the backoff ladder."""
     last_exc: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
             return fn()
         except Exception as e:  # noqa: BLE001 — filtered to retryable below
             message = f"{type(e).__name__}: {e}"
+            if give_up_markers and any(m.lower() in message.lower() for m in give_up_markers):
+                raise
             if not any(m.lower() in message.lower() for m in _RETRYABLE_MARKERS) or attempt == max_attempts:
                 raise
             delay = _BACKOFF_BASE_S * (2 ** (attempt - 1))
@@ -170,26 +182,35 @@ class GeminiLLMClient:
         # 2026-08-31). Failing over autonomously beats dying and requiring a
         # human restart — which is exactly the Autonomy criterion.
         self.fallback_models = fallback_models or []
+        self._quota_exhausted: set[str] = set()
 
     def _call(self, model: str, system: str, prompt: str, max_tokens: int) -> LLMResponse:
-        candidates = [model] + [m for m in self.fallback_models if m != model]
+        chain = [model] + [m for m in self.fallback_models if m != model]
+        # Skip models already known to be out of daily quota. If every model is
+        # exhausted, fall back to trying the whole chain again rather than
+        # refusing outright — the quota may have rolled over.
+        candidates = [m for m in chain if m not in self._quota_exhausted] or chain
+
         last_exc: Exception | None = None
         for i, candidate in enumerate(candidates):
-            attempts = 4 if i < len(candidates) - 1 else _MAX_ATTEMPTS
+            is_last = i == len(candidates) - 1
             try:
                 return _call_with_retry(
                     lambda c=candidate: self._call_once(c, system, prompt, max_tokens),
                     f"gemini:{candidate}",
-                    max_attempts=attempts,
+                    max_attempts=_MAX_ATTEMPTS if is_last else 4,
+                    give_up_markers=_QUOTA_MARKERS if not is_last else (),
                 )
             except Exception as e:  # noqa: BLE001 — only retryable errors reach here after retries
                 message = f"{type(e).__name__}: {e}"
                 if not any(m.lower() in message.lower() for m in _RETRYABLE_MARKERS):
                     raise
+                if any(m.lower() in message.lower() for m in _QUOTA_MARKERS):
+                    self._quota_exhausted.add(candidate)
+                    print(f"[llm_client] {candidate} is out of quota — skipping it for the rest of this run.")
                 last_exc = e
-                if i < len(candidates) - 1:
-                    print(f"[llm_client] {candidate} exhausted retries ({message[:120]}) — "
-                          f"failing over to {candidates[i + 1]}")
+                if not is_last:
+                    print(f"[llm_client] failing over to {candidates[i + 1]}")
         raise last_exc
 
     def _call_once(self, model: str, system: str, prompt: str, max_tokens: int) -> LLMResponse:
