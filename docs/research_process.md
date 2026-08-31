@@ -456,6 +456,157 @@ one point, not the ~2.7 that mixing scales suggests.
 
 ---
 
+### 6.6 User feature-sensitivities: real, decaying, and harmful to expose
+
+The last open question from 5.2.2. `user_id` carries identity information that
+is not affinity and not a two-way interaction. The untested candidate was
+SENSITIVITY: users differ in how strongly their outcome responds to item and
+context features. This is the one class of per-user quantity that can move a
+within-user ranking, since a per-user constant provably cannot (user historical
+long_view rate scores GAUC exactly 0.500000) while a per-user slope multiplies a
+feature that varies across the candidates.
+
+Four sensitivities were built from train only: response to video quality, to
+session position, to duration, and spread across tabs. Each is an
+empirical-Bayes shrunk covariance, quantile-banded into 8 levels, entering the
+shared embedding table as an ordinary categorical field.
+
+**Run 1 was invalid, and the controls are what revealed it.** The video-quality
+regressor was out-of-fold but the per-user statistic computed from it was not:
+for a training row of user u, the band was built using that row's own label.
+Arms: real -0.0048 (CI excluding zero), permuted +0.0003, randomized -0.0002.
+Identical fields carrying no user information were free, while the label-derived
+values did real damage — the signature of a leak rather than of a failed
+hypothesis. With only a control and a treatment arm this would have read as
+"sensitivities are harmful". Trap #2 in tier1_core, applied one level too
+shallow. Fixed by estimating each training row's band from that user's rows in
+the other folds; the fix recovered 75% of the drop.
+
+**Run 2, leak-free.** Still negative:
+
+| arm | selection primary | vs control |
+|---|---|---|
+| control | 0.6078 | — |
+| real | 0.6066 | **-0.0012** (CI [-0.00319, -0.00044]) |
+| permuted | 0.6075 | -0.0003 (CI includes 0) |
+| randomized | 0.6077 | -0.0001 (CI includes 0) |
+
+Both null controls are exactly neutral, so four extra categorical fields of this
+cardinality cost nothing. Only the real values hurt.
+
+**The estimator is not noise.** Split-half reliability, same users, disjoint
+halves: quality 0.580, tab 0.598, position 0.444, duration 0.310 (Spearman-Brown
+0.47-0.75). Median 31 train impressions per user is enough. So the model is
+being handed a genuine, reproducible user property and is made worse by it.
+
+**The property does decay over time.** Matched-size random split versus temporal
+split of train, identical estimator and sample size, differing only in temporal
+separation:
+
+| field | random r | temporal r | retention |
+|---|---|---|---|
+| sens_quality | 0.3633 | 0.2501 | 68.8% |
+| sens_pos | 0.2641 | 0.1021 | 38.7% |
+| sens_dur | 0.1610 | 0.1251 | 77.7% |
+| sens_tab | 0.4493 | 0.2904 | 64.6% |
+
+The first version of this comparison was confounded — the train window is
+front-loaded, so the late half had 5x fewer rows and a noisier estimate.
+Subsampling early to match (190,802 rows each) is what the table above reports.
+
+**Run 3 tested whether that decay is the mechanism. It is not.** Estimating the
+sensitivity only from the late window (adjacent to validation) versus only from
+the early window, sample sizes matched:
+
+| arm | selection primary | vs control |
+|---|---|---|
+| control | 0.6078 | — |
+| early only | 0.6071 | -0.0007 (CI includes 0) |
+| late only | 0.6073 | -0.0005 (CI includes 0) |
+| full train | 0.6066 | -0.0012 (CI excludes 0) |
+
+late minus early = **+0.00017**, CI [-0.00102, +0.00148]. Recency is irrelevant.
+
+**The unpredicted result is the ordering.** The full-train arm, built from SIX
+TIMES more data, is worse than either subset, and is the only arm whose CI
+excludes zero. More precise measurement produces more harm. That inverts what a
+useful-but-noisy feature would do.
+
+Interpretation, labelled as inference rather than measurement: harm appears to
+scale with how much the model trusts the band. The user embedding already learns
+this modulation from the same training data; an explicit precomputed summary
+adds a redundant, coarser pathway competing for capacity, and the sharper that
+summary, the more the model leans on the pathway that generalises worse.
+
+**Disposition: CLOSED.** What is established is narrow and worth stating
+exactly. Per-user feature sensitivities are real, reliably measurable, and decay
+across roughly a week. Exposing them explicitly to this model is harmful
+regardless of recency, and increasingly so with better estimation. This does NOT
+establish that no user representation could help — it establishes that this one,
+at this quantisation, does not, and that the failure is not noise, not
+cardinality, and not staleness.
+
+---
+
+### 6.7 Conditional blending: the disagreement is not exploitable
+
+DeepFM and GBDT genuinely disagree, unlike the five neural families at >=0.998
+rank correlation, and a GLOBAL blend of them gave only +0.0002. The untested
+question was whether the disagreement is PREDICTABLE — does one model
+systematically win for identifiable users or contexts, so that a gate could
+route between them?
+
+This was answered with a diagnostic BEFORE building any gate, because a gate
+cannot exploit heterogeneity that is not there.
+
+Setup. A LightGBM on item/context features only (within-user-constant features
+excluded: they cannot reorder a user's candidates, and the earlier LambdaMART
+attempt wasted its top splits on exactly those). Selection-half primary: DeepFM
+0.6083, GBDT 0.5959, rank correlation **0.7426** — i.e. MORE disagreement than
+the 0.9427 in the record, so this ran with more raw material than the original
+finding had.
+
+**The global blend sweep picks w = 1.0, pure DeepFM.** The GBDT adds nothing at
+any weight.
+
+Oracle ceilings, using validation labels for diagnosis only:
+
+| | primary | headroom over best global blend |
+|---|---|---|
+| best global blend (w=1.0) | 0.6083 | — |
+| per-TAB oracle (15 groups) | 0.6085 | +0.0002 |
+| per-USER oracle (22,377 groups) | 0.6397 | +0.0314 |
+
+The per-user number is a trap, and the two controls say so.
+
+**Control 1, equal quality.** A per-user oracle between two SEEDS of the same
+DeepFM — statistically identical models with nothing to gate on — yields
++0.0146 of "headroom" across four disjoint pairs. Selecting the better of two
+noisy per-user estimates on a median of 4 impressions is winner's curse.
+
+**Control 2, matched on the quality gap.** DeepFM and the GBDT differ by 0.0124,
+so control 1 is not matched. Building a DEGRADED DeepFM (DeepFM plus calibrated
+noise, tuned to the GBDT's exact score level, containing no information DeepFM
+lacks) and running the same per-user oracle gives **+0.0291**. Against the real
+GBDT the figure is +0.0314. The excess attributable to the GBDT being a
+genuinely different model is therefore **+0.0023** — and that is an ORACLE with
+the labels in hand, so a train-only gate would capture a fraction of it against
+a +0.001 reporting floor.
+
+The per-tab oracle corroborates independently: at the one granularity where
+per-group estimates are reliable, heterogeneity is +0.0002.
+
+**Disposition: CLOSED.** The DeepFM/GBDT disagreement is real but not
+predictably exploitable at any granularity tested. This also retro-explains the
++0.0002 global blend: there was never anything for a weight to capture.
+
+Method note worth keeping: a per-group oracle over noisy per-group estimates is
+upward-biased by construction, and the bias here (+0.0291) was TWELVE TIMES the
+real signal (+0.0023). Any future "upper bound" of this shape must be run
+against a quality-matched control before it is believed.
+
+---
+
 ## 7. Process failures, and what they cost
 
 Recorded because they changed conclusions.

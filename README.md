@@ -190,6 +190,24 @@ Research scripts (`scripts/seed_ensemble.py`, `error_slices.py`, `sweep_user_wd.
 
 **On Windows, `starter_kit/submit.py --check` crashes on success** — its success line prints U+2713, which cp1252 cannot encode, so the traceback appears *after* every check has passed. Run it as `PYTHONIOENCODING=utf-8 python submit.py --check ...` and confirm exit 0.
 
+## Team
+
+| Member | Contribution |
+|---|---|
+| **Rohan Joshua** | Agent architecture and loop, evaluation protocol, research experiments and controls, submission pipeline and provenance |
+| **Thaddus Lee** | Referee integration, crash checkpointing and resume, autonomous ablation targeting, Starter Kit and dataset integration, metric/convergence alignment |
+| **Waseem Akram** | Audit of all technical files and documentation — research audit and submission audit |
+
+## Development tools, APIs and assets
+
+**Tools:** VS Code, Claude Code (used as an AI coding assistant during development — disclosed for transparency; it is not part of the submitted system).
+
+**APIs used by the agent:** Google Gemini — `gemini-3.5-flash` and `gemini-3.5-flash-lite`. Token usage for the scored run is in `logs/resource_usage.json` (91,430 total). An Anthropic backend is implemented and selectable in `config/agent_config.yaml` but was **not** used for the scored run.
+
+**Libraries:** PyTorch, pandas, numpy, scikit-learn, PyYAML, tqdm, google-genai, anthropic. LightGBM is used only by the blending diagnostic on a research branch and is not a submission dependency.
+
+**Data:** KuaiRand-Pure only, via the organizer's Starter Kit. No external training data, no pretrained weights, and the Zenodo caption/category supplements were treated as out of scope since neither the problem statement nor the Starter Kit sanctions them.
+
 ## Limitations, and what we'd do with more time
 
 - **The agent cannot create new files.** `agent/code_editor.py` rewrites whole files at fixed paths, so it can change the loss, the model and its own ablation grid, but cannot add a module. A create-a-file flow needs a different backup/restore mechanism.

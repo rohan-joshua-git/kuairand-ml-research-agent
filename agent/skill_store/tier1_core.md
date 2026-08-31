@@ -240,6 +240,30 @@ figures — do not compare a validation score against them. On the validation
 scale (random 0.4841, oracle 0.8484) baseline = 32.3% of attainable range,
 champion = 33.3%.
 
+**USER FEATURE-SENSITIVITIES ARE CLOSED — real, decaying, harmful to expose.**
+Per-user slopes (response to quality / position / duration, spread across tabs),
+shrunk and 8-banded. Selection primary: control 0.6078 / real 0.6066 (-0.0012,
+CI excludes 0) / permuted 0.6075 / randomized 0.6077 (both CIs include 0). The
+estimator is NOT noise (split-half r 0.31-0.60). The property DOES decay
+temporally (matched-size retention 39-78% over ~1 week). But recency is not the
+mechanism: late-window vs early-window estimates differ by +0.00017, CI includes
+zero. And full-train estimation (6x more data) is WORSE than either subset,
+i.e. more precise measurement causes more harm. Do not retry sensitivity bands.
+If you build any user-derived feature, run BOTH a permuted and a randomized
+control — run 1 of this experiment was an in-fold user-level target-encoding
+leak, and only the neutral controls revealed it.
+
+**CONDITIONAL DeepFM/GBDT BLENDING IS CLOSED — no exploitable heterogeneity.**
+Global blend sweep picks w=1.0 (pure DeepFM); the GBDT adds nothing at any
+weight. Per-tab oracle headroom +0.0002. Per-user oracle looks like +0.0314 but
+a QUALITY-MATCHED control (DeepFM degraded with noise to the GBDT's exact score
+level, carrying no extra information) yields +0.0291 of the same "headroom" —
+winner's curse from picking the luckier of two noisy per-user estimates on a
+median of 4 impressions. True excess: +0.0023, and that is an oracle with labels
+in hand. GENERAL LESSON: a per-group oracle over noisy per-group estimates is
+upward-biased by construction; here the bias was 12x the real signal. Never
+quote one without a quality-matched control.
+
 **Per-user candidate lists are tiny**: median 4 impressions, 63.7% of users
 have <= 5. So nDCG@5 is effectively full-list nDCG for most users, and there
 is little room for clever re-ordering.
