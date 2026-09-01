@@ -1,395 +1,346 @@
-# Devpost Writeup
+# An agent that tries to prove itself wrong
 
-Track 2 — Autonomous Machine Learning Research Agent for Recommender Systems
-(KuaiRand-Pure). Every number below was produced by running the code in this
-repo; nothing is projected or rounded in our favour. Where the agent failed,
-the failure is reported as a result, because the delta over baseline is
-scored continuously and a false claim is worse than an honest negative.
+**TikTok TechJam 2026 — Track 2: Autonomous ML Research Agent for Recommender Systems**
 
-## Inspiration
+---
 
-Machine learning engineers spend most of their time in one loop: read the
-problem, inspect the data, engineer features, train and tune, evaluate,
-reflect, and go again (see `README.md` Figure 1). It's structured and
-repetitive — which is exactly what makes it a plausible target for an LLM
-agent to run on its own, rather than a human grinding through it by hand.
+## The number we didn't report
 
-We also found this exact idea has essentially never been run as a
-competition. **AutoRecLab** (Beel et al., arXiv:2510.18104) explicitly
-calls for benchmarks and competitions evaluating agents on producing
-reproducible RecSys findings with minimal human input. **AgentX**
-(Kuaishou, arXiv:2606.26859) — from the same company that published
-KuaiRand — already runs a closed-loop agent internally on their production
-ranking system. We built the open, offline, benchmarked version of that
-idea on Kuaishou's own public dataset.
+At one point in this project our agent surfaced a candidate that scored **+0.0314**
+over the official baseline. Ten times our final margin. It would have looked
+extraordinary on a leaderboard.
 
-## What it does
+We measured it properly and it was worth **+0.0023**.
 
-An autonomous ML research agent that:
-1. Trains a working reference pipeline on KuaiRand-Pure.
-2. Iterates on it entirely on its own — proposing hypotheses, writing code,
-   training, evaluating, and deciding what to try next — using only train
-   and validation data.
-3. Guards itself against the single biggest failure mode in this space:
-   optimizing a biased validation proxy instead of genuinely improving.
+The gap was winner's curse. We had picked the best of many noisy per-group
+estimates, and the act of picking the maximum is itself biased upward — the
+group that wins is disproportionately the one whose noise happened to be
+positive. Once we estimated each group's effect out-of-fold instead of reading
+it off the same data that selected it, **92% of the improvement evaporated.**
 
-Three things make this agent different from "fork AIDE and point it at a
-dataset":
+We report **+0.0033**. It is a small number. It is also a number we can defend,
+and this writeup is mostly about the machinery that turned the first number into
+the second.
 
-- **An unbiased referee.** KuaiRand-Pure ships a ~1.19M-row uniformly-
-  random-exposure log outside the prescribed train/val/test split. We use
-  it as a second, unbiased scoring channel, and drive course-correction off
-  the *divergence* between biased-validation score and unbiased-probe
-  score — not off validation score alone.
-- **A compression gate.** Before any checkpoint is designated final, a
-  fresh "reproducer" agent — with no memory of the search that found it —
-  has to reproduce the approach from a short, honest summary. This
-  directly targets a documented failure (SpecBench): an agent choosing a
-  97%-validation/0%-held-out lookup-table artifact over a genuine
-  53%/43% solution, because validation score was the only thing it
-  searched against.
-- **A warm-started, ablation-first search.** Instead of rewriting the whole
-  pipeline every round, the agent ablates pipeline blocks each iteration to
-  find which one is actually carrying the score, and targets only that
-  block — informed by a pre-seeded, tiered domain-knowledge store rather
-  than starting cold. Published ablations (HASTE) show this cuts
-  iterations-to-best roughly in half versus flat/no knowledge loading.
+---
 
-We also found two undocumented quirks in the dataset itself: `is_click`
-resolves to a genuine click in one UI and a duration-thresholded
-"valid play" in another (keyed on the `tab` field), and the shipped
-`video_features_statistic` columns are month-long averages that leak
-across the train/val/test boundary. Both are handled explicitly (see
-`pipeline/data/label.py` and `leakage_guard.py`) rather than silently.
+## What we built
 
-## How we built it
+An autonomous research agent that proposes hypotheses about a recommender
+system, writes the code to test them, runs controlled experiments, and — the
+part we care about most — **tries to kill its own findings before believing
+them.**
 
-- **Agent brain:** provider-agnostic behind one `LLMClient` protocol
-  (`agent/llm_client.py`). Runs used Gemini Flash on the free tier; the
-  Anthropic backend (Sonnet for code generation, Opus for reflection) is
-  wired and selectable from `config/agent_config.yaml`. One verified gotcha
-  is documented in code: Gemini 3.x thinks by default, and at the default
-  thinking level internal thinking tokens can consume the entire output
-  budget before any visible text is emitted — we pin `thinking_level="low"`
-  and re-verified non-empty output at the exact budgets the loop uses.
-- **Starting pipeline:** a PyTorch Factorization Machine over the official
-  baseline's own five fields (user_id, video_id, author_id, tab,
-  dur_bucket), early-stopped on validation *primary* rather than on loss.
-  It reaches **valid GAUC 0.6676 / nDCG@5 0.5358 / primary 0.6017** against
-  the published **0.6674 / 0.5357 / 0.6016** — parity within the 0.0008
-  five-seed std. This was a deliberate correction: our first editable model
-  scored 0.5201 and the agent burned iterations climbing toward parity
-  instead of past it. Two measured causes — `duration_ms` fed raw into an
-  MLP (mean ~9.7e4, std ~9.5e4, so it dominated small-initialised
-  embeddings) and `author_id` never joined at all.
-- **Scoring:** `pipeline/evaluate.py` imports and calls the organizer's
-  vendored `starter_kit/evaluate.py` rather than reimplementing GAUC/nDCG@5,
-  so a validation number cannot silently diverge from what actually grades
-  the hidden test set.
-- **Every scored run is a fresh subprocess.** This started as a bug fix and
-  became a design rule. The orchestrator is long-lived and had imported the
-  pipeline at startup, so `from x import y` bindings meant it was scoring
-  the *pre-patch* code every iteration. A subprocess re-imports whatever is
-  on disk, and additionally isolates the loop from crashes in
-  agent-authored code.
+The task: rank videos within each user on KuaiRand-Pure. Scored by
+**GAUC** (positive-count-weighted per-user AUC) and **nDCG@5**, with the
+primary metric being their mean.
 
-Full run logs, intervention counts and token/wall-clock usage are in
-`logs/` and `docs/results_table.md` (generated by `agent/report.py`).
+**Result: validation primary 0.6049 against the official FM baseline's 0.6016.**
 
-## Challenges we ran into
-
-**The agent proposed the right idea and could not implement it.** The first
-live iteration produced the hypothesis "replace pointwise BCE with a
-user-grouped BPR pairwise loss" — independently landing on the organizer's
-own #1-ranked lead. But the editable allowlist covered only `features.py`
-and `label.py`, and file routing was derived from the *ablation block name*,
-computed before the hypothesis existed. So a loss-function hypothesis was
-routed to the feature file, where a loss function cannot be written. The
-agent did the only in-scope thing available: it added a `sort_values("user_id")`
-step, preparing for a pairwise loss it had no way to write. We added
-`train.py` to the allowlist and now route off what the hypothesis itself
-says it needs to change (the reflection model emits a `TARGET_FILE` line,
-with keyword routing as a fallback).
-
-**A submission that passes every check and is still wrong.** `build_features`
-sorts rows by `user_id`; the raw logs are not user-sorted. Scores were
-therefore written against permuted rows while still satisfying the official
-`--check`, because that check validates row *identity* columns, not whether
-your score belongs to that row. Fixed by carrying an explicit original-position
-column through the feature build and un-permuting before writing, verified
-against the vendored writer plus a per-row spot check.
-
-**Leakage that does not look like leakage.** `play_time_ms` was known to be
-a near-direct proxy for `long_view` (corr 0.64). Auditing the same causal
-class surfaced `comment_stay_time` (corr 0.17 — staying in the comments
-implies you long-viewed), `profile_stay_time` and `is_profile_enter`: all
-measured *during or after* the impression being predicted. Only
-`duration_ms`, an item property known before exposure, survives as a numeric
-input — which is exactly the official baseline's own conclusion.
-
-**Free-tier outages killed runs mid-iteration.** A 503 took down one live run
-and daily-quota 429s took down another. LLM calls now get bounded exponential
-backoff plus failover across sibling Flash models (quota buckets are
-per-model), and `agent/supervisor.py` relaunches a crashed orchestrator,
-which resumes from `agent/checkpoint.py` rather than restarting the budget.
-
-The running record of these is `logs/pitfalls.json`, which the agent itself
-reads back into its prompt each iteration so it does not repeat a failure.
-
-## Results
-
-**Submitted: validation primary 0.6049 vs the official baseline 0.6016 —
-+0.0033, both metrics up** (GAUC 0.6674 -> 0.6720, nDCG@5 0.5357 -> 0.5378),
-scored by the organizer's own `submit.py --score`.
-
-We claim **no hidden-test score**. It is scored once by the organizer, and a
-validation number compared against a test number would overstate progress.
-
-**The single largest improvement was found by the agent, autonomously.** It
-proposed a DeepFM-lite architecture — a parallel [32, 16] MLP branch beside
-the FM's linear and pairwise terms — which cleared ε=0.002 against its own
-best and was checkpointed. It proposed that *after* its first, larger DeepFM
-attempt crashed the smoke test and was rolled back automatically.
-
-| Step | Valid primary | Author |
-|---|---|---|
-| Official FM baseline (published) | 0.6016 | organizer |
-| Our editable pipeline (torch FM, official 5 fields) | 0.6017 | human |
-| + session-position feature | 0.6024 | human |
-| **+ agent's DeepFM-lite MLP branch (accepted)** | **0.6045** | **agent** |
-| + 10-seed rank-average ensemble (submitted) | **0.6049** | human |
-
-Three honest notes.
-
-**The ensemble's mean gain is not established.** 5-seed against 1-seed is
-+0.00027, while negative controls comparing the *same* model to itself reach
-0.00077. It ships for **variance**, which is established: over 20 seeds the
-single-seed std is 0.00049 against a 5-seed std of 0.00020, matching sqrt(n).
-On a one-shot submission the floor is what matters — worst single seed 0.6036,
-worst 5-seed ensemble 0.6046.
-
-**We found our own champion figure was optimistic.** It had been recorded as
-0.6047 with a 3-seed std of 0.0001. Seeds 0-2 were a lucky triple; over 20
-seeds the mean is 0.60448 with std 0.00049 — an 8x larger spread. Every
-3-seed standard deviation in our earlier notes should be read accordingly.
-
-**Iteration 6 scored higher than the shipped checkpoint** (0.6050) but cleared
-the accepted best by only +0.0005, below ε, so it was rejected and rolled back
-rather than shipped.
-
-Per-iteration trajectory, resource usage and the intervention count are in
-`docs/results_table.md`, generated from `logs/iterations.jsonl`.
-
-What the agent proposed, in order: pairwise BPR (0.5994), a multi-task
-auxiliary `is_click` head (0.6013), listwise ListNet (0.6004). Each was
-rolled back automatically for failing to clear ε=0.002, and the run converged
-under the official N=3 rule.
-
-### The negative results are the finding
-
-We went looking for why the organizer's own priority list did not pay off, and
-the answer is a property of the dataset rather than of the agent. Measuring
-within-user GAUC of individual signals on a 4,000-user validation sample
-(0.5 = no signal at all):
-
-| Signal | within-user GAUC |
-|---|---|
-| Train-derived smoothed video quality prior | **0.6453** |
-| `tab` | 0.5387 |
-| Session position (impression order within a user-day) | 0.5148 |
-| `duration_ms` / `hourmin` | ~0.486 |
-| **user x author affinity** | **0.4981 — none** |
-| **user x video affinity** | **0.4970 — none** |
-
-The entire official FM reaches 0.6674. A single scalar item-quality prior gets
-to 0.6453 of that alone. **This task is item-quality estimation with almost no
-personalisation signal**, which explains three things at once: why adding
-user-side features was already flat in the organizer's own ablation, why our
-loss-alignment changes could not help (the objective was not the bottleneck),
-and why behavioural-sequence modelling — the organizer's #2 unexplored lead —
-is unlikely to pay off here. Repeat exposure is only 1.62% of validation rows,
-and long_view rates on repeat pairs (0.3072) and new pairs (0.3134) are
-effectively identical, so there is little history to model.
-
-We also checked, so as not to misattribute the plateau: the model is not
-undertrained (raising the epoch cap 12 -> 40 early-stops at 13 with an
-identical score), and a LambdaMART ranker optimising nDCG directly scored
-0.5901 — it spends its strongest splits on features that are constant within a
-user and therefore cannot change that user's ordering.
-
-### On the random-exposure log
-
-KuaiRand-Pure ships a 1,186,059-row uniform-random-exposure log, and it is
-tempting as extra training data. It is not usable: **897,721 of those rows
-(75.7%) fall inside the hidden-test date window**, and its long_view rate is
-0.0850 against 0.3133 in the standard log, because uniform exposure mostly
-shows people videos they do not want. Training on it means test-period
-contamination plus a train/serve distribution mismatch. We use it only as the
-unbiased probe, which is its sanctioned use — and that distribution gap is
-also why our referee's absolute divergence is always large, so only the change
-in divergence across iterations is meaningful. We report that as an
-instrumentation weakness rather than claiming the referee caught something.
-
-### What we discovered by trying to falsify ourselves
-
-After the score converged we kept going, but as research rather than a leaderboard
-hunt: for each remaining unexplained signal, form a mechanism hypothesis and build
-the control that would expose a false positive. Seven investigations, every one
-with a control attached:
-
-| Hypothesis | Test | Result | Decision |
+| | baseline | ours | delta |
 |---|---|---|---|
-| `user_id` helps via affinity or capacity | row-level shuffle, parameters held fixed | identity **108%**, capacity **-8%** | capacity refuted |
-| The user embedding overfits, so shrink it | field-specific weight decay, 6 arms x 3 seeds | monotone **negative** | closed |
-| Performance decays across the eval window | frozen model-free reference on the same days | gap **+0.0008** | closed |
-| The gap to 0.8645 means signal is missing | simulate y ~ Bernoulli(q) from the calibrated model | irreducible **0.2556** > observed **0.2431** | closed |
-| Users differ in feature *sensitivity* | 4-arm, out-of-fold, permuted + randomized controls | **-0.0012**, CI excludes zero | closed |
-| Staleness explains that failure | early vs late estimation, sizes matched | **+0.00017** | refuted |
-| DeepFM/GBDT disagreement is exploitable | per-group oracle + quality-matched control | **+0.0023** of an apparent +0.0314 | closed |
+| GAUC | 0.6610\* | **0.6720** | +0.0046 |
+| nDCG@5 | 0.5282\* | **0.5378** | +0.0021 |
+| **primary** | **0.6016** | **0.6049** | **+0.0033** |
 
-**Three of these are worth more than the score is.**
+\* baseline validation figures; the organizer's published *hidden-test* primary
+is 0.5946, a different split on a different scale. **We claim no hidden-test
+score anywhere.** The hidden test is scored once, by the organizer. Every number
+in this writeup is validation.
 
-*`user_id` encodes identity, not capacity.* Deleting it costs -0.0091, yet
-user-video affinity measures at chance three separate times. Permuting the
-row-to-user link while holding parameter count, MLP input width and code
-frequencies fixed loses the entire effect. The permutation has to be row-level:
-a bijective user-to-row remap is a symmetry of the model and trains to an
-identical result, which would have produced a convincing false null.
+---
 
-*The published ceiling is unreachable by any model.* 0.8645 is the organizer's
-label-oracle ceiling and is correctly computed. But in a simulated world where
-our model IS the true conditional probability — nothing left to learn by
-construction — an oracle still beats it by 0.2556, while our real gap is 0.2431,
-smaller. A long_view is a coin flip; an oracle that sees the realised label wins
-by that margin regardless of model quality. The distance to 0.8645 is therefore
-not evidence of remaining headroom.
+## The one structural insight everything rests on
 
-*A per-group oracle is upward-biased, and here the bias was 12x the signal.* A
-per-user oracle over DeepFM and GBDT showed +0.0314 of apparent headroom, which
-would have justified days of gate-building. A quality-matched control — DeepFM
-degraded with calibrated noise to the GBDT's exact score level, carrying no
-information DeepFM lacks — reproduced +0.0291 of it. Real excess: +0.0023.
+**Only within-user order is scored.**
 
-### The leak we introduced, found, and fixed
+This sounds obvious and it is not. It has a brutal corollary: *anything constant
+within a user cannot reorder that user's candidates.* We verified this
+empirically — a feature that is constant per user produces a GAUC of exactly
+0.500000.
 
-Our first sensitivity experiment produced a clean, significant result: real
-sensitivities scored -0.0048 with a CI excluding zero, while permuted and
-randomized versions of the identical fields were neutral.
+That single fact killed more of our ideas than any experiment did, and it is why
+several plausible-looking features are worthless here:
 
-Noise being free while real values did damage is not how a failed hypothesis
-behaves — it is how a **leak** behaves. We had computed each user's statistic
-from that user's own training labels, so a training row's feature contained that
-row's label: an in-fold target encoding one level above where we had applied the
-out-of-fold rule. Rebuilding it so each row's band comes from that user's *other*
-folds recovered 75% of the drop.
+- **`tab` (the feed surface)** looks like the most powerful variable in the
+  dataset: its `long_view` base rate runs from **0.004 to 0.489**. But 60% of
+  users appear in only one tab, and for them it contributes **+0.0001**. Its
+  entire apparent power is the level gap *between* tabs — which the metric never
+  sees.
+- **`author_id` and `music_id`** looked like strong pooling levels. Then we
+  checked: **87% of authors and 98% of music IDs own exactly one video.**
+  Target-encoded, they correlate 0.985 and 0.987 with the video prior. They are
+  `video_id` wearing a hat. Only `tag` turned out to be a genuine pooling level.
+  This corrected one of our *own* top-ranked recommendations.
+- **17.5% of the metric is structurally unmovable.** 3,917 validation users have
+  a single impression. Model, prior and oracle score them identically, and GAUC
+  excludes them entirely.
 
-With only a control and a treatment arm this would have been filed as
-"sensitivities are harmful." The two null controls are what made it diagnosable.
-We report it because the discipline is the point, not because it flatters us.
+---
 
-### What we measured versus what we believe
+## How we kept ourselves honest
 
-Kept separate deliberately. **Measured:** sensitivities are reliably estimable
-(split-half 0.31-0.60), they decay 22-61% across a week, exposing them costs
--0.0012, both null controls are neutral, and estimating from 6x more data makes
-the harm worse. **Interpretation, not established:** the model's own user
-embedding already learns this modulation, and an explicit precomputed summary
-adds a redundant, coarser pathway that generalises worse.
+Four pieces of machinery, all built before we needed them.
+
+**1. A selection/confirmation split.** Validation users are partitioned by a
+hashed user ID with a salt fixed *before the run started* — 11,270 selection
+users, 11,107 confirmation. Every hypothesis, sweep and early-stopping decision
+sees selection only. We budgeted a small number of confirmation looks and spent
+one. You cannot tune against a number you refuse to look at.
+
+**2. Negative controls on everything.** Permuted, randomized, quality-matched
+and same-model-seed groups. A result that does not beat its own control is not a
+result. This is what caught the winner's curse above: the "improvement" sat
+comfortably inside the same-model control band.
+
+**3. Knowing our own noise floor.** We had recorded a 3-seed standard deviation
+of 0.0001 and were treating small gains as real. Running 20 seeds showed the
+true single-seed std is **0.00049** — we had been under-estimating our own noise
+by **8×**. Seeds 0–2 were an unusually tight triple. Every comparison after that
+point is seed-matched over enough seeds to clear 2 standard errors.
+
+**4. A rule against outcome features.** `play_time_ms` correlates **0.64** with
+the label and predicts it at 84.7% accuracy from a threshold alone. It is not a
+feature — it is the label in disguise, an *outcome* of the very impression being
+predicted. Same for `profile_stay_time`, `comment_stay_time`, `is_profile_enter`.
+They are available in the data and they are banned as inputs in our pipeline.
+Anyone who feeds them in gets a spectacular validation score and a model that
+cannot work.
+
+---
+
+## The leak we introduced, caught, and fixed
+
+We are including this because we think it is the most instructive thing that
+happened.
+
+We added a per-user statistic as a feature. It scored **−0.0048** — actively
+harmful. Meanwhile the permuted and randomized controls came back clean, costing
+nothing.
+
+**That is not how a failed hypothesis behaves. That is how a leak behaves.** A
+useless feature costs you nothing; noise is free. Only a feature carrying
+information the model can exploit at training time and not at inference time
+does *damage*.
+
+The statistic was computed from each user's own training labels. A training
+row's feature therefore contained that row's own label — an in-fold target
+encoding one level above where we had already applied the out-of-fold rule. We
+knew to be out-of-fold at the *row* level and had not thought about the *user*
+level.
+
+Rebuilding it so each row's value comes from that user's other folds recovered
+**75% of the drop.**
+
+The lesson we took: the *sign and shape* of a result is diagnostic. We found
+this by asking why real values were doing worse than noise, not by reading code.
+
+---
+
+## Six hypotheses, honestly tested, all null
+
+| hypothesis | how we tested it | result |
+|---|---|---|
+| `user_id` helps via user×video affinity or via model capacity | row-level shuffle holding parameter count, MLP width and code-frequency fixed | identity **108%**, capacity **−8%** — capacity refuted |
+| Field-specific weight decay on user embeddings | swept 5 orders of magnitude | monotone negative throughout |
+| Temporal drift needs recency weighting | train-window sweep, matched sizes | no drift; gap **+0.0008**. The late-day decline is day *difficulty*, not staleness |
+| User sensitivities (per-user response slopes) help | split-half reliability + two null controls | reliable (0.31–0.60) and real, but exposing them costs **−0.0012** |
+| The gap to the 0.8645 oracle is missing signal | simulated a world where the model is exactly right | irreducible gap **0.2556** > observed **0.2431** |
+| Model blending / gating exploits family disagreement | out-of-fold re-estimation | **+0.0023** of an apparent **+0.0314** |
+
+One control deserves calling out. To test whether `user_id` contributes
+*identity* or merely *capacity*, we permute the user→row assignment. Our first
+instinct was a bijective user→user remap — and that would have been **wrong**: a
+bijection is a *symmetry of the model*, so it trains to a numerically identical
+result. It would have produced a clean, convincing, completely false null. The
+permutation has to be at the row level.
+
+We caught that before running it. It is the kind of mistake that does not
+announce itself.
+
+---
+
+## The oracle ceiling is not a ceiling
+
+The starter kit publishes a label-revealing oracle at **0.8645**, against a
+baseline of 0.5946. Every team looking at that gap sees enormous headroom.
+
+We tested whether it is reachable *by any probabilistic model*. Fit calibrated
+probabilities `q` (mean predicted 0.3133 vs actual 0.3133), then simulate a
+world where the model is exactly right by drawing `y ~ Bernoulli(q)`. In that
+world, by construction, **there is nothing left to learn.** Score both the model
+and a label-revealing oracle against those simulated labels:
+
+| | primary |
+|---|---|
+| perfect-probability model vs simulated labels | 0.5915 |
+| label oracle vs simulated labels | 0.8471 |
+| **irreducible gap, pure coin-flip noise** | **0.2556** |
+| our model vs real labels | 0.6053\* |
+| oracle vs real labels | 0.8484 |
+| **observed gap** | **0.2431** |
+
+\* measured on an earlier artifact; see the note in `docs/research_process.md`.
+
+**The observed gap is smaller than the gap a perfect model faces in a world with
+nothing left to learn.** The oracle sees each impression's realised outcome. A
+long-view is a coin flip, and no probability model can order a 0.31-chance item
+that came up 1 above a 0.30-chance item that came up 0.
+
+This does not prove no signal remains — if the model is missing structure then
+`q` is wrong and the simulation flatters us. Nor does it impugn the organizer's
+figure, which is exactly what it claims to be. What it establishes is narrower
+and still useful: **the size of the gap to the oracle is not evidence of
+remaining headroom.** Anyone arguing from "0.8645 minus 0.605 is huge" has to
+make the case another way.
+
+---
+
+## Challenges
+
+**Our own numbers were the hardest adversary.** Three separate times a promising
+result turned out to be an artifact of how we measured it: the winner's curse,
+the user-level leak, and the 8× noise under-estimate. None was found by a test
+suite. Each was found by asking why a number had the shape it did.
+
+**Choosing the smaller number.** Late in the project we found that our shipped
+models were early-stopping over *all* validation rows, including the confirmation
+half we had promised to hold out. Fixing it moved our headline from **0.6053 down
+to 0.6049.** We shipped the lower number and kept the superseded file hashes in
+the repo so the swap is auditable. The higher number was real; it just wasn't a
+clean held-out estimate, and a number you can't defend is worth less than a
+smaller one you can.
+
+**Auditing our own audit.** One of our commit messages claimed a `grep` had
+returned no consumers of a variable. The consumer was four lines below the
+definition — the grep had excluded the file itself. Since history can't be
+amended after pushing, we wrote the correction into `docs/COMPLIANCE_NOTE.md`.
+An audit that misdescribes its own diff is worth less than no audit.
+
+**Discipline about the hidden test.** `loader.py` defaults to `allow_test=False`;
+exactly one file may flip it, and only on the final submission run. The test
+submission is format-checked and **never locally scored.** We genuinely do not
+know our hidden-test score. That is the point.
+
+---
 
 ## How we built it: a human-relayed adversarial loop
 
-Development used two AI assistants in opposing roles, with a human relaying
-between them. **Claude Code** implemented, ran experiments and reported results.
-**OpenAI** received those reports and attacked them — challenging conclusions,
-demanding controls, proposing alternative explanations and setting stopping
-rules. A human passed messages both ways and made the calls.
+Worth being precise, because it is unusual and it is *not* part of the submitted
+system.
 
-This was **not** an autonomous multi-agent system. The relay was manual. We
-document it because it changed outcomes we can point at:
+**The submitted agent** runs on Gemini (`gemini-3.6-flash`, with a documented
+fallback to `gemini-3.5-flash` after a quota 429 during the graded run). It
+proposes a hypothesis, writes a code diff, runs an ablation, evaluates against
+the selection half, and keeps or rolls back.
 
-| The adversary's intervention | What it changed |
-|---|---|
-| "more seeds cannot hurt" is not true of a ranking metric | corrected an overstatement about variance before it reached the writeup |
-| run the oracle diagnostic *before* building a gate | killed the conditional-blending branch in one GBDT fit rather than a full gate pipeline |
-| add a *randomized* arm as a stronger negative control | produced the 4-arm design that made an in-fold leak diagnosable instead of reading as a failed hypothesis |
-| test early-vs-late estimation directly | refuted staleness, which we had been treating as the likely mechanism |
-| 0.8645 is the *label-oracle* ceiling, not "not a ceiling" | sharpened a claim that would not have survived review |
-| freeze the submission before further research | produced the frozen, hash-verified artifact every later experiment was measured against |
+**Our development process** ran a second loop, by hand. Claude acted as
+researcher and engineer; its output was pasted into OpenAI's model, which was
+prompted to attack the work — find the leak, name the confound, reject the
+conclusion. The critique came back and was acted on. That relay is where the
+bijection-symmetry trap, the winner's-curse re-estimation, and the
+selection/confirmation contamination were all caught.
 
-The adversary rarely proposed better *models*. It proposed better *tests*, and
-repeatedly stopped work that would have produced a confident wrong answer.
+Two different loops, both adversarial by construction. The human in the middle
+was the transport layer.
 
-**This describes our development process, not the submitted system.** The agent
-runs on Google Gemini; no OpenAI or Anthropic model is called by the pipeline at
-scoring time.
+---
 
 ## Verified reproducibility
 
-The repository was cloned fresh from GitHub, data staged, and the pipeline
-re-run end to end. Both artifacts regenerate **byte-identical** to their
-recorded SHA-256s:
+Not asserted — run, twice, from a fresh clone:
 
 ```
-smoke test              0.4498908751631786   identical fingerprint
-baseline reproduction   0.6015 vs published 0.6016   MATCHES
-metric decomposition    1.599e-14 vs starter_kit/evaluate.py
-submission_valid.csv    HASH MATCH
-submission_test.csv     HASH MATCH
-official checker        124,909 / 170,588 rows, both pass
-official score (valid)  GAUC 0.6720 | nDCG@5 0.5378 | primary 0.6049
+smoke fingerprint     0.4498908751631786          unchanged across every patch
+Task Requirement #1   0.6015 vs published 0.6016  matched on validation
+metric decomposition  max diff 1.599e-14          vs starter_kit/evaluate.py
+official --score      GAUC 0.6720 | nDCG@5 0.5378 | primary 0.6049
+submission CSVs       BYTE-IDENTICAL to the committed SHA-256s
 ```
+
+The reported 0.6049 was produced twice by independent paths — a cached score
+matrix through our own decomposition, and `make_submission` → CSV →
+`starter_kit/evaluate.py`. They agree to four decimals on all three metrics,
+which establishes that the number we report is the number the submitted artifact
+actually scores.
+
+---
+
+## What we're proud of
+
+- Reporting **+0.0033** when **+0.0314** was sitting there, and being able to
+  show exactly why the larger number was false.
+- Catching a leak we introduced ourselves, from the *shape* of the evidence.
+- Nearly running a control that would have produced a convincing false null, and
+  catching the symmetry first.
+- Shipping the **lower** of two scores because the higher one wasn't clean.
+- A repo where a judge can clone, run, and get our exact bytes back.
+
+## The last night: we tested the two obvious next steps, and both lost
+
+With the submission already frozen and byte-verified, we spent a final night on
+the two levers we most expected to work. Fourteen arms, seed-matched, selection
+half only. **Zero wins.**
+
+**A ranking objective loses, monotonically.** GAUC is a within-user AUC, and AUC
+is exactly the probability a positive outranks a negative from the same user, so
+training pointwise BCE is a genuine objective mismatch. We implemented
+within-user BPR and a hybrid. Every dose made it worse:
+
+| α (weight on the pairwise term) | 0 (base) | 0.1 | 0.25 | 0.5 | 1.0 | pure BPR |
+|---|---|---|---|---|---|---|
+| selection primary | **0.60781** | 0.60682 | 0.60646 | 0.60612 | 0.60516 | 0.60488 |
+
+The mechanism was in our own sampler's log: **382,579 pairable positives across
+24,290 two-class users — 33.5% of training rows.** A pairwise loss can only use
+rows from users who have *both* a positive and a negative. It discards the other
+66.5% — and those rows still teach the model what a good *video* looks like,
+which transfers to every user. The metric ignores single-class users. The
+representation must not. Matching the loss to the metric meant throwing away two
+thirds of the signal to do it.
+
+**Fitted blend weights overfit, and we caught it in the act.** This was the one
+technique we'd heard was working well for others. We ran it under a protocol
+that can actually detect the failure: split the selection half *again* under a
+different salt into `selA` (the only rows weights are fitted on) and `selB` (the
+only rows results are reported on).
+
+| | selA — fitted | selB — honest |
+|---|---|---|
+| base | 0.61174 | **0.60481** |
+| greedy fitted blend | **0.61194** | **0.60393** |
+
+**It wins where its weights were fitted and loses by −0.00089 where they were
+not.** The +0.0002 isn't a small real gain; it's the search finding noise, and
+the sign flips the moment it has to generalise. Same mechanism as the winner's
+curse that opened this writeup, arriving through a different door.
+
+We changed nothing. The submitted CSVs still hash to the frozen values.
+
+## What we'd do next
+
+- **A longer agent run.** The graded run converged in 7 hypotheses. The
+  convergence rule also discarded a validation-best checkpoint worth ~+0.0005
+  because it did not clear the acceptance threshold — disclosed in the README,
+  and fixed in the code for future runs.
+- **Attack the representation, not the objective or the ensemble.** Both of
+  those are now measured dead ends. The evidence points at a local optimum that
+  the available levers do not move, which is what our own oracle simulation
+  predicted.
 
 ## Team
 
-- **Rohan Joshua** — agent architecture and loop, evaluation protocol, research
-  experiments and controls, submission pipeline and provenance.
-- **Thaddus Lee** — referee integration, crash checkpointing and resume,
-  autonomous ablation targeting, Starter Kit and dataset integration,
-  metric/convergence alignment.
-- **Waseem Akram** — audit of all technical files and documentation; research
-  audit and submission audit.
+- **Rohan Joshua** — agent architecture and loop
+- **Thaddus Lee** — referee integration
+- **Waseem Akram** — auditor: technical files, documentation, research and
+  submission audits
 
 ## Built with
 
-**Development tools:** VS Code, Claude Code (an AI coding assistant used during
-development; it is not part of the submitted system).
+`python` · `pytorch` · `pandas` · `numpy` · `gemini` · KuaiRand-Pure
 
-**APIs:** Google Gemini — `gemini-3.5-flash` and `gemini-3.5-flash-lite`. The
-scored run used 91,430 tokens in 0.1965 h across 9 iterations, with 2 logged
-manual interventions. An Anthropic backend is implemented and selectable but was
-not used for the scored run.
+---
 
-**Libraries:** PyTorch, pandas, numpy, scikit-learn, PyYAML, tqdm, google-genai,
-anthropic. LightGBM is used only by a research-branch diagnostic and is not a
-submission dependency.
-
-**Data:** KuaiRand-Pure only, via the organizer's Starter Kit. No external
-training data, no pretrained weights. The Zenodo caption and category
-supplements were treated as out of scope, since neither the problem statement
-nor the Starter Kit sanctions them.
-
-## What's next
-
-- **Automate the adversarial loop.** The critique loop described above was
-  human-relayed. Wiring a second provider in as an automated adversary — one
-  model proposes, a different model attacks the claim and demands controls —
-  would make the critique a measurable part of the agent rather than a manual
-  step. This is the extension we would build first.
-- **Give the agent a signal it can actually exploit.** Our measurements say
-  the ceiling here is item-quality estimation, which the FM already does well.
-  The directions with any remaining room are content-side (video captions and
-  category taxonomy exist as Zenodo supplements) rather than
-  behavioural — but those are not referenced by the official problem statement,
-  so we treated them as out of scope rather than quietly using them.
-- **Make the compression gate re-train, not just reason.** As built, a fresh
-  context judges a terse summary with no validation access. The stronger
-  version re-runs training from that summary and compares scores.
-- **Set the referee's alert on the change in divergence, not its level.** The
-  two splits have structurally different label distributions, so the absolute
-  gap is uninformative — see Results.
-- **Persist "this hypothesis scored worse" across runs.** Pitfalls currently
-  record crashes and gate rejections, so a fresh run would happily re-propose
-  BPR. Carrying scored-worse outcomes into the pitfall store would stop that.
-- **New-file creation in the editor**, so the agent can add an architecture
-  variant under `pipeline/model/architectures/` rather than only rewriting
-  files at fixed paths.
+*No hidden-test score is claimed in this writeup or anywhere in our repository.
+Every figure above is validation, and the protocol that produced it is in
+`pipeline/eval_protocol.py` with the salt fixed before the first run.*

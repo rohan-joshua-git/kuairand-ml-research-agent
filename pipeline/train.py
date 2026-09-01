@@ -186,7 +186,7 @@ class FactorizationMachineWithMLP(nn.Module):
     """
 
     def __init__(self, total_dim: int, num_fields: int, k: int = 16,
-                 use_fm: bool = True, use_mlp: bool = True):
+                 use_fm: bool = True, use_mlp: bool = True, n_aux: int = 0):
         super().__init__()
         self.use_fm, self.use_mlp = use_fm, use_mlp
         self.embedding = nn.Embedding(total_dim, k)
@@ -203,10 +203,19 @@ class FactorizationMachineWithMLP(nn.Module):
             nn.Linear(16, 1)
         ) if use_mlp else None
 
+        # Auxiliary multi-task head. Predicts related engagement outcomes
+        # (is_click, is_like, ...) from the SHARED embedding, as extra training
+        # TARGETS only. It is never consulted at inference — `forward` returns
+        # the main logit unless `with_aux` is set — so no outcome field is ever
+        # an input. The hypothesis is that a denser related signal regularises
+        # the shared representation; long_view fires on 31.3% of rows while
+        # is_click fires on 46.3%.
+        self.aux = nn.Linear(mlp_input_dim, n_aux) if n_aux > 0 else None
+
         nn.init.normal_(self.embedding.weight, std=0.01)
         nn.init.zeros_(self.linear.weight)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, with_aux: bool = False):
         e = self.embedding(x)                      # (B, F, k)
 
         # First-order term is always present; it is what an FM-free model keeps.
@@ -219,6 +228,10 @@ class FactorizationMachineWithMLP(nn.Module):
         if self.use_mlp:
             out = out + self.mlp(e.view(e.size(0), -1)).squeeze(-1)
 
+        if with_aux:
+            if self.aux is None:
+                raise ValueError("with_aux=True but the model has no auxiliary head")
+            return out, self.aux(e.view(e.size(0), -1))
         return out
 
 
@@ -366,6 +379,10 @@ def run_training(
     user_weight_decay: float = 0.0,
     early_stop_mask: np.ndarray | None = None,
     user_id_mode: str = "real",
+    loss_mode: str = "bce",
+    bpr_alpha: float = 1.0,
+    aux_labels: list[str] | None = None,
+    aux_weight: float = 0.3,
 ) -> TrainResult:
     """`user_weight_decay` adds decay on the `user_id` rows of the shared
     embedding table, ON TOP OF the global `weight_decay` (Adam applies decay
@@ -395,6 +412,8 @@ def run_training(
     """
     if user_id_mode not in ("real", "shuffled", "removed"):
         raise ValueError(f"user_id_mode must be real/shuffled/removed, got {user_id_mode!r}")
+    if loss_mode not in ("bce", "bpr", "hybrid"):
+        raise ValueError(f"loss_mode must be bce/bpr/hybrid, got {loss_mode!r}")
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -428,6 +447,65 @@ def run_training(
     y_train = torch.tensor(y_np, dtype=torch.float32)
     val_label = resolve_label(val_feat)
 
+    # --- within-user pairwise sampling -------------------------------------
+    # GAUC is a within-user AUC, and AUC is exactly the probability that a
+    # positive outranks a negative FROM THE SAME USER. Pointwise BCE optimises
+    # calibration and reaches that objective only indirectly; a pair whose two
+    # rows share a user is a direct sample of the quantity being scored.
+    #
+    # Pairs are built once (as offsets into a user-sorted index) and RESAMPLED
+    # every epoch, so the model sees many different (pos, neg) combinations
+    # without ever materialising the full O(sum n_pos * n_neg) pair set.
+    #
+    # Users with no positive or no negative training row are dropped: they
+    # generate no pair, which mirrors the metric itself — GAUC is undefined for
+    # a single-class user and the official evaluator excludes those users.
+    pos_rows = pos_owner = neg_rows = neg_off = neg_cnt = None
+    if loss_mode in ("bpr", "hybrid"):
+        _tru = train_feat["user_id"].to_numpy()
+        _ordr = np.argsort(_tru, kind="stable")
+        _su, _sy = _tru[_ordr], y_np[_ordr]
+        _bnd = np.flatnonzero(np.r_[True, _su[1:] != _su[:-1]])
+        _p_chunks, _n_chunks, _owner, _offs, _cnts = [], [], [], [], []
+        _running = 0
+        for _s, _e in zip(_bnd, np.r_[_bnd[1:], len(_su)]):
+            _blk, _yb = _ordr[_s:_e], _sy[_s:_e]
+            _p, _n = _blk[_yb > 0.5], _blk[_yb <= 0.5]
+            if len(_p) == 0 or len(_n) == 0:
+                continue
+            _p_chunks.append(_p)
+            _n_chunks.append(_n)
+            _owner.append(np.full(len(_p), len(_offs), dtype=np.int64))
+            _offs.append(_running)
+            _cnts.append(len(_n))
+            _running += len(_n)
+        if not _p_chunks:
+            raise ValueError("loss_mode requires pairs but no user has both classes")
+        pos_rows = np.concatenate(_p_chunks)
+        pos_owner = np.concatenate(_owner)
+        neg_rows = np.concatenate(_n_chunks)
+        neg_off = np.asarray(_offs, dtype=np.int64)
+        neg_cnt = np.asarray(_cnts, dtype=np.int64)
+        print(f"[train] loss_mode={loss_mode}: {len(pos_rows):,} pairable positives "
+              f"across {len(neg_off):,} two-class users "
+              f"({len(pos_rows) / len(y_np):.1%} of train rows)")
+
+    # Auxiliary TARGETS (never inputs). These columns are outcomes of the
+    # impression being predicted, so using them as features would be label
+    # leakage; used as extra heads they only shape the shared embedding during
+    # training and are absent from every inference path.
+    y_aux = None
+    if aux_labels:
+        missing = [c for c in aux_labels if c not in train_feat.columns]
+        if missing:
+            raise ValueError(f"aux_labels not in training frame: {missing}")
+        if model_type == "dcnv2":
+            raise ValueError("aux_labels is implemented for the FM/MLP model only")
+        y_aux = torch.tensor(
+            train_feat[list(aux_labels)].to_numpy(dtype=np.float32),
+            dtype=torch.float32)
+        print(f"[train] aux heads {list(aux_labels)} weight={aux_weight}")
+
     num_fields = len(id_maps["fields"])
     if model_type == "dcnv2":
         model = DCNv2(total_dim=id_maps["total_dim"], num_fields=num_fields, k=embed_dim,
@@ -437,6 +515,7 @@ def run_training(
             total_dim=id_maps["total_dim"], num_fields=num_fields, k=embed_dim,
             use_fm=model_type in ("deepfm", "fm"),
             use_mlp=model_type in ("deepfm", "mlp"),
+            n_aux=0 if y_aux is None else y_aux.shape[1],
         ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     loss_fn = nn.BCEWithLogitsLoss()
@@ -458,14 +537,65 @@ def run_training(
     epoch_losses: list[float] = []
     best_primary, best_state, bad_epochs = -1.0, None, 0
 
+    pair_rng = np.random.default_rng(seed + 777)
+    n_batches_total = (n + batch_size - 1) // batch_size
+
     for _epoch in range(epochs):
         model.train()
         permutation = torch.randperm(n, generator=generator)
+
+        # Resample one negative per pairable positive, drawn from that SAME
+        # user's negatives. Fresh every epoch: the pair set is combinatorially
+        # large and re-drawing is what stops the model fitting one arbitrary
+        # sample of it.
+        pair_a = pair_b = None
+        pair_bs = 0
+        if pos_rows is not None:
+            _j = neg_off[pos_owner] + (pair_rng.random(len(pos_rows))
+                                       * neg_cnt[pos_owner]).astype(np.int64)
+            _shuf = pair_rng.permutation(len(pos_rows))
+            pair_a = torch.as_tensor(pos_rows[_shuf], dtype=torch.long)
+            pair_b = torch.as_tensor(neg_rows[_j][_shuf], dtype=torch.long)
+            pair_bs = (len(pos_rows) + n_batches_total - 1) // n_batches_total
+
         total_loss, n_batches = 0.0, 0
         for start in range(0, n, batch_size):
             idx = permutation[start:start + batch_size]
             optimizer.zero_grad()
-            loss = loss_fn(model(x_train[idx].to(device)), y_train[idx].to(device))
+
+            point = None
+            if loss_mode in ("bce", "hybrid"):
+                if y_aux is None:
+                    point = loss_fn(model(x_train[idx].to(device)),
+                                    y_train[idx].to(device))
+                else:
+                    _main, _ax = model(x_train[idx].to(device), with_aux=True)
+                    point = (loss_fn(_main, y_train[idx].to(device))
+                             + aux_weight * loss_fn(_ax, y_aux[idx].to(device)))
+
+            pair = None
+            if pair_a is not None:
+                _o = n_batches * pair_bs
+                _sa, _sb = pair_a[_o:_o + pair_bs], pair_b[_o:_o + pair_bs]
+                if len(_sa) > 0:
+                    # BPR: -log sigma(s_pos - s_neg). Its gradient pushes the
+                    # two scores apart, which is precisely what a within-user
+                    # AUC counts, and it is invariant to any per-user constant
+                    # (which cannot reorder that user's candidates anyway).
+                    _delta = (model(x_train[_sa].to(device))
+                              - model(x_train[_sb].to(device)))
+                    pair = -nn.functional.logsigmoid(_delta).mean()
+
+            if point is not None and pair is not None:
+                loss = point + bpr_alpha * pair
+            elif pair is not None:
+                loss = pair
+            elif point is not None:
+                loss = point
+            else:  # pure-bpr epoch that ran out of pairs; fall back pointwise
+                loss = loss_fn(model(x_train[idx].to(device)),
+                               y_train[idx].to(device))
+
             if user_slice is not None:
                 w_user = model.embedding.weight[user_slice[0]:user_slice[1]]
                 loss = loss + 0.5 * user_weight_decay * (w_user ** 2).sum()

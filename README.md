@@ -96,6 +96,12 @@ The final model was not selected because it won a validation sweep. It survived 
 | Users differ in feature *sensitivity* | 4-arm OOF + permuted + randomized controls | **−0.0012**, CI excludes zero | closed |
 | Staleness explains that failure | early vs late estimation, sample sizes matched | **+0.00017**, CI includes zero | refuted |
 | DeepFM/GBDT disagreement is exploitable | per-group oracle + quality-matched control | **+0.0023** of an apparent +0.0314 | closed |
+| A ranking loss beats a pointwise one | within-user BPR + hybrid, alpha swept 0.1-1.0 | **monotone negative** at every dose | closed |
+| Bigger embeddings help | k in {8,16,24,32,48,64}, 3 seeds each | **monotone negative** above k=16 | closed |
+| Auxiliary engagement heads regularise | is_click/is_like as training targets only | **+0.0002**, inside noise; worse ensemble | closed |
+| Fitted blend weights help | greedy selection, weights fit and reported on disjoint users | **+0.0002 fitted / -0.0009 held out** | closed |
+
+The last four were run on the final night, after the submission was frozen and byte-verified; fourteen arms produced zero wins at 2 standard errors and nothing was adopted. See [section 10](docs/research_process.md#10-the-final-night-four-more-directions-four-more-nulls).
 
 Detail for each is in [`docs/research_process.md`](docs/research_process.md); the last two live on the research branches (`research/user-sensitivity` @ `9e971bf`, `research/conditional-blend` @ `b5ae63d`), which were deliberately not merged so the frozen artifact could not be disturbed.
 

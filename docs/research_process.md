@@ -970,3 +970,116 @@ a decision point where the evidence changed what we did next.
     user-level bootstrap, a temporal split-half, and a negative control of two
     seed groups of the same model. With the standing caveat that none of these
     can correct selection over ~30 validation comparisons.
+
+---
+
+# 10. The final night: four more directions, four more nulls
+
+Run on 2026-09-01, 00:40–08:30 SGT, after the submission was already frozen and
+byte-verified. Prompted by a report that another competitor had reached a much
+higher number through "tuning, then adjusting weights and model blending."
+
+Protocol: every arm seed-matched against `base` on the **selection half only**;
+the confirmation half was not read by any script in this batch. Comparisons are
+paired per-seed differences reported with a standard error, and nothing is
+called a win below 2 SE. 38 cached score vectors across 14 arms.
+
+## 10.1 A ranking objective loses, monotonically
+
+GAUC is a within-user AUC, and AUC is exactly `P(s_pos > s_neg)` for a pair
+drawn from one user. The shipped model trains pointwise `BCEWithLogitsLoss`,
+which optimises calibration and reaches the ordering only indirectly. Closing
+that mismatch is the most principled untested lever in the repo, so we
+implemented within-user BPR (`loss_mode="bpr"`) and a hybrid
+(`BCE + alpha * BPR`), sampling one negative per positive from the same user and
+resampling every epoch.
+
+| arm | selection primary | paired vs base |
+|---|---|---|
+| base | 0.60781 | — |
+| hybrid, alpha 0.1 | 0.60682 | **−0.00099** LOSS |
+| hybrid, alpha 0.25 | 0.60646 | **−0.00135** LOSS |
+| hybrid, alpha 0.5 | 0.60612 | **−0.00169** LOSS |
+| hybrid, alpha 1.0 | 0.60516 | — |
+| pure BPR | 0.60488 | — |
+
+**Monotone in alpha.** A scatter of nulls is weak evidence; a dose-response
+curve is strong evidence, and this one runs the wrong way at every dose.
+
+The mechanism is visible in the sampler's own log line: `382,579 pairable
+positives across 24,290 two-class users (33.5% of train rows)`. A pairwise loss
+can only consume rows belonging to users who have **both** a positive and a
+negative. It discards the other 66.5% — but those rows still teach the model
+what a good *video* looks like, which transfers to every user. **The metric
+ignores single-class users; the representation must not.** Matching the loss to
+the metric threw away two thirds of the training signal to do it.
+
+## 10.2 Capacity is already at its optimum
+
+| k | 8 | **16** | 24 | 32 | 48 | 64 |
+|---|---|---|---|---|---|---|
+| selection primary | 0.60758 | **0.60781** | 0.60703 | 0.60676 | 0.60661 | 0.60627 |
+| verdict | null | shipped | LOSS | LOSS | LOSS | LOSS |
+
+Also monotone above k=16, and k=8 is statistically indistinguishable from k=16.
+This independently reproduces the earlier `sweep_user_wd` finding that this
+model wants *less* capacity, not more — the opposite of the usual intuition that
+a bigger embedding table is a free win.
+
+## 10.3 Auxiliary multi-task heads: null
+
+`long_view` fires on 31.3% of training rows; `is_click` fires on 46.3% of the
+same rows and is a strictly related outcome. We added a head predicting
+engagement outcomes from the shared embedding, as training **targets only** —
+the head is absent from every inference path, so no outcome field is ever an
+input (`play_time_ms` and friends remain banned as features).
+
+| arm | selection primary | paired vs base |
+|---|---|---|
+| aux `is_click`, w=0.3 | 0.60819 | +0.00019 null |
+| aux `is_click`, w=0.1 | 0.60736 | −0.00045 null |
+
+The w=0.3 arm has the highest single-seed mean of anything we tried all night,
+and it is **not a result**: two seeds, std 0.00080, well inside noise, and its
+10-seed rank-averaged ensemble (0.60779) is *worse* than base's (0.60826). This
+is what the maximum of fourteen noisy arms looks like.
+
+## 10.4 Fitted blend weights: overfitting, caught in the act
+
+The competitor's reported method was weight-tuned model blending. We ran it
+under a protocol that can detect the failure mode: split the selection half
+again by user hash under a **different salt** into `selA` (the only rows weights
+are fitted on) and `selB` (the only rows results are reported on), leaving the
+confirmation half untouched. Caruana-style greedy selection with replacement
+over 13 configs.
+
+| | selA (fitted) | selB (honest) |
+|---|---|---|
+| base | 0.61174 | **0.60481** |
+| equal-weight all 13 | 0.61159 | 0.60442 |
+| **greedy fitted blend** | **0.61194** | **0.60393** |
+
+**The fitted blend beats base where its weights were fitted and loses by
+−0.00089 where they were not.** The +0.0002 on `selA` is not a small real gain;
+it is the search finding noise, and the sign flips the moment it is asked to
+generalise 30,000 rows to the left.
+
+This is the same mechanism as the winner's curse in §9, arriving through a
+different door, and it is the direct answer to "would tuned blending have helped
+us?" — no, and the version that appears to help is the version that was measured
+wrong.
+
+## 10.5 What the night establishes
+
+Fourteen arms, zero wins at 2 SE. Two monotone dose-response curves pointing
+away from the two most plausible remaining levers. The shipped configuration —
+DeepFM-lite, k=16, pointwise BCE, 10-seed equal-weight rank average — was not
+beaten by any variant tried.
+
+We did not change the submission. `submissions/submission_valid.csv` and
+`submission_test.csv` still hash to the values frozen in `FROZEN_CONFIG.json`.
+
+The honest summary is that this model sits in a local optimum that the levers
+available to us do not move, which is what §8's oracle simulation predicted:
+the gap to 0.8645 is mostly irreducible label noise, not headroom waiting to be
+taken.

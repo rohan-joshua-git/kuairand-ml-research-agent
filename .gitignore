@@ -48,3 +48,4 @@ Thumbs.db
 
 # Generated code-graph output (graphify) — regenerable via `graphify update .`
 graphify-out/
+.lab_cache/
